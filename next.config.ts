@@ -13,19 +13,47 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
  *
  * The rest of the headers are straight blocks, safe to enforce today:
  *   - HSTS: only meaningful on HTTPS (no-op on http://localhost).
- *   - X-Content-Type-Options / X-Frame-Options / Referrer-Policy:
- *     baseline OWASP hardening, no behavioural cost.
+ *   - X-Content-Type-Options / Referrer-Policy: baseline OWASP
+ *     hardening, no behavioural cost. X-Frame-Options is deliberately
+ *     NOT here — see FRAME_ANCESTORS below.
  *   - Permissions-Policy: we don't use camera / microphone / etc, so
  *     deny them. A supply-chain compromise or a forgotten plugin
  *     can't silently opt back in.
  */
+/**
+ * Origins allowed to embed wacrm in an iframe.
+ *
+ * The MedMust admin workspace renders the wacrm inbox in-place at
+ * /admin/customers/support. `crm.medmust.in` and `medmust.in` share a
+ * registrable domain, so that frame is same-site: Supabase's SameSite=Lax
+ * session cookies flow into it normally and none of third-party cookie
+ * blocking, Chrome storage partitioning or Safari ITP applies. Do NOT
+ * "fix" an embed problem by setting SameSite=None — it is not needed here
+ * and would weaken the cookie for no gain.
+ *
+ * X-Frame-Options cannot express an allow-list (ALLOW-FROM is dead in
+ * every current browser), so it is deliberately absent and this list,
+ * shipped as an ENFORCING `frame-ancestors`, is the clickjacking control.
+ * Keep those two facts together: re-adding X-Frame-Options: DENY silently
+ * breaks the embed, because it wins over frame-ancestors in every browser
+ * that honours it.
+ */
+const FRAME_ANCESTORS = [
+  "'self'",
+  "https://medmust.in",
+  // MedMust's staging backend, so the embed can be proven before production.
+  "https://medmust-web--medmust-dev.asia-east1.hosted.app",
+  // Local MedMust dev server pointing at the deployed CRM.
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+].join(" ");
+
 const SECURITY_HEADERS = [
   {
     key: "Strict-Transport-Security",
     value: "max-age=63072000; includeSubDomains; preload",
   },
   { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "X-Frame-Options", value: "DENY" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   {
     // Microphone is allowed for same-origin (`self`) so the inbox
@@ -56,10 +84,21 @@ const SECURITY_HEADERS = [
       // Supabase REST + realtime (WSS). All Meta API calls happen
       // server-side, so graph.facebook.com does not belong here.
       "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
-      "frame-ancestors 'none'",
+      `frame-ancestors ${FRAME_ANCESTORS}`,
       "base-uri 'self'",
       "form-action 'self'",
     ].join("; "),
+  },
+  {
+    /*
+     * The policy above is report-only and therefore blocks NOTHING, its
+     * frame-ancestors included. This second, enforcing header carries the
+     * framing rule alone — the only directive we are confident enough to
+     * enforce today. Two CSP headers legally coexist: the browser enforces
+     * this one and reports violations of the other.
+     */
+    key: "Content-Security-Policy",
+    value: `frame-ancestors ${FRAME_ANCESTORS}`,
   },
 ] as const;
 
