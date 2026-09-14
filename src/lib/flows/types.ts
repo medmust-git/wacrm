@@ -242,6 +242,14 @@ export interface KeywordTriggerConfig {
    * question, restarting the menu. Implies `interrupt` for these words.
    */
   interrupt_keywords?: string[];
+  /**
+   * When true, this flow also starts on a text or tap that matched no other
+   * flow, while nothing is running. Lets a menu flow answer "ok thanks" or
+   * "is this available?" with the menu instead of silence. Checked after every
+   * other flow, so a real keyword always wins; the human-handling guard still
+   * applies, so it never talks over staff.
+   */
+  catch_all?: boolean;
 }
 
 // No knobs in v1 — the trigger has a single semantic. Kept as a type
@@ -328,8 +336,18 @@ export interface FlowFallbackPolicy {
   max_reprompts: number;
   /** Stale-run sweep cutoff. */
   on_timeout_hours: number;
-  /** What to do once max_reprompts has been hit. */
-  on_exhaust: "handoff" | "end";
+  /**
+   * What to do once max_reprompts has been hit. `restart` ends the run and
+   * starts the same flow again from its entry node, so an options-only bot
+   * returns the customer to its menu instead of handing them to staff.
+   */
+  on_exhaust: "handoff" | "end" | "restart";
+  /**
+   * Sent before a reprompt re-sends the question, e.g. "Please tap one of the
+   * options below." Without it the customer sees the same question again with
+   * no hint that their typed reply was not understood.
+   */
+  reprompt_text?: string;
 }
 
 export const DEFAULT_FALLBACK_POLICY: FlowFallbackPolicy = {

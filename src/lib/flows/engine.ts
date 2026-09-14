@@ -418,6 +418,16 @@ async function findEntryFlow(
     }
     // 'manual' triggers do not auto-start from inbound messages.
   }
+  // Nothing matched: a catch-all flow answers anything typed or tapped, so a
+  // customer never gets silence. A cart never reaches here (handled above).
+  if (message.kind !== "order" && candidates.length) {
+    const catchAll = typed.find(
+      (flow) =>
+        flow.trigger_type === "keyword" &&
+        (flow.trigger_config as KeywordTriggerConfig)?.catch_all === true,
+    );
+    if (catchAll) return catchAll;
+  }
   return null;
 }
 
@@ -1068,7 +1078,7 @@ async function advanceFromNodeKey(
           headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
           footerText: cfg.footer_text,
           retailerIds: cfg.mode === "product" ? retailerIds.slice(0, 1) : retailerIds,
-          sectionTitle: cfg.section_title,
+          sectionTitle: cfg.section_title ? await fill(db, run, cfg.section_title) : undefined,
         });
         if ("skipped" in sent) {
           await logEvent(db, run.id, "node_entered", node.node_key, { skipped: sent.skipped });
@@ -1285,7 +1295,7 @@ export async function dispatchInboundToFlows(
       // One SELECT for the whole flow's nodes — advance loop is now
       // in-memory. See loadAllNodes.
       const nodes = await loadAllNodes(db, activeRun.flow_id);
-      return handleReplyForActiveRun(db, activeRun, input.message, nodes);
+      return handleReplyForActiveRun(db, activeRun, input, nodes);
     }
 
     // No active run → look for a flow whose entry trigger matches.
@@ -1321,9 +1331,10 @@ export async function dispatchInboundToFlows(
 async function handleReplyForActiveRun(
   db: AdminClient,
   run: FlowRunRow,
-  message: ParsedInbound,
+  input: DispatchInboundInput,
   nodes: Map<string, FlowNodeRow>,
 ): Promise<DispatchInboundResult> {
+  const message = input.message;
   // Note: we intentionally do NOT persist the raw customer text. A
   // `collect_input` prompt that asks "what's your card number?" would
   // otherwise leave the PAN sitting in flow_run_events.payload forever,
@@ -1435,9 +1446,8 @@ async function handleReplyForActiveRun(
   }
 
   // No match → fallback. Apply the policy.
-  const policy = resolveFallbackPolicy(
-    (await loadFlow(db, run.flow_id))?.fallback_policy,
-  );
+  const runFlow = await loadFlow(db, run.flow_id);
+  const policy = resolveFallbackPolicy(runFlow?.fallback_policy);
   const newReprompts = run.reprompt_count + 1;
   await db
     .from("flow_runs")
@@ -1460,6 +1470,15 @@ async function handleReplyForActiveRun(
     // failure here is logged but does not end the run — the customer
     // still has the original prompt on screen and can retry.
     try {
+      if (policy.reprompt_text && currentNode.node_type !== "collect_input") {
+        await engineSendText({
+          accountId: run.account_id,
+          userId: run.user_id,
+          conversationId: run.conversation_id!,
+          contactId: run.contact_id!,
+          text: await fill(db, run, policy.reprompt_text),
+        });
+      }
       if (currentNode.node_type === "send_buttons") {
         await sendButtonsAndSuspend(db, run, currentNode);
       } else if (currentNode.node_type === "send_list") {
@@ -1499,7 +1518,14 @@ async function handleReplyForActiveRun(
     await endRun(db, run.id, "handed_off", "fallback_exhausted");
     return { consumed: true, flow_run_id: run.id, outcome: "handed_off" };
   }
-  // action.type === 'end'
+  if (action.type === "restart" && runFlow?.entry_node_id) {
+    // Back to the start of the same flow. The new run's trigger_text is this
+    // reply, so a menu flow that routes on intent still sends a customer who
+    // typed "track my order" at a product list straight to tracking.
+    await endRun(db, run.id, "completed", "fallback_restart");
+    return startNewRun(db, runFlow, input, nodes);
+  }
+  // action.type === 'end' (or a restart of a flow with no entry node)
   await endRun(db, run.id, "completed", "fallback_exhausted_end");
   return { consumed: true, flow_run_id: run.id, outcome: "completed" };
 }

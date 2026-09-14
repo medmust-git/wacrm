@@ -473,6 +473,86 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
     });
   });
 
+  describe("options-only bot", () => {
+    const CATCH_ALL_FLOW = {
+      ...KEYWORD_FLOW,
+      id: "flow-care",
+      trigger_config: { keywords: ["menu"], match_type: "word", catch_all: true },
+    };
+    const BUTTON_NODES = [
+      ...NODES,
+      {
+        id: "n4",
+        flow_id: "flow-care",
+        node_key: "pick",
+        node_type: "send_buttons",
+        config: {
+          text: "Which one?",
+          buttons: [{ reply_id: "a", title: "Option A", next_node_key: "done" }],
+        },
+      },
+    ];
+    const WAITING = {
+      id: "old-run",
+      flow_id: "flow-care",
+      account_id: "acct-1",
+      user_id: "u-1",
+      contact_id: "ct-1",
+      conversation_id: "cv-1",
+      status: "active",
+      current_node_key: "pick",
+      vars: {},
+    };
+
+    it("starts the catch-all flow for text no keyword matched", async () => {
+      h.state.flows = [KEYWORD_FLOW, CATCH_ALL_FLOW];
+      const result = await dispatch({ kind: "text", text: "ok thanks", meta_message_id: "c1" });
+      expect(result.consumed).toBe(true);
+      expect(startedRuns()[0].row.flow_id).toBe("flow-care");
+    });
+
+    it("lets a real keyword win over the catch-all", async () => {
+      h.state.flows = [CATCH_ALL_FLOW, KEYWORD_FLOW];
+      await dispatch({ kind: "text", text: "order status", meta_message_id: "c2" });
+      expect(startedRuns()[0].row.flow_id).toBe("flow-1");
+    });
+
+    it("does not talk over staff", async () => {
+      h.state.flows = [CATCH_ALL_FLOW];
+      h.state.agentMessageCount = 1;
+      expect((await dispatch({ kind: "text", text: "ok thanks", meta_message_id: "c3" })).consumed).toBe(false);
+    });
+
+    it("does not answer a cart", async () => {
+      h.state.flows = [CATCH_ALL_FLOW];
+      expect((await dispatch({ kind: "order", catalog_id: null, items: [], meta_message_id: "c4" })).consumed).toBe(false);
+    });
+
+    it("says to tap an option before re-asking", async () => {
+      h.state.flows = [{ ...CATCH_ALL_FLOW, fallback_policy: { on_unknown_reply: "reprompt", max_reprompts: 1, on_timeout_hours: 2, on_exhaust: "restart", reprompt_text: "Please tap an option." } }];
+      h.state.nodes = BUTTON_NODES;
+      h.state.activeRuns = [{ ...WAITING, reprompt_count: 0 }];
+
+      const result = await dispatch({ kind: "text", text: "what?", meta_message_id: "c5" });
+
+      expect(result.outcome).toBe("fallback_fired");
+      expect(engineSendText).toHaveBeenCalledWith(expect.objectContaining({ text: "Please tap an option." }));
+      expect(startedRuns()).toEqual([]);
+    });
+
+    it("restarts the flow from its entry instead of handing off once reprompts run out", async () => {
+      h.state.flows = [{ ...CATCH_ALL_FLOW, fallback_policy: { on_unknown_reply: "reprompt", max_reprompts: 1, on_timeout_hours: 2, on_exhaust: "restart" } }];
+      h.state.nodes = BUTTON_NODES;
+      h.state.activeRuns = [{ ...WAITING, reprompt_count: 1 }];
+
+      const result = await dispatch({ kind: "text", text: "Track my order", meta_message_id: "c6" });
+
+      expect(result.consumed).toBe(true);
+      expect(startedRuns()).toHaveLength(1);
+      expect(startedRuns()[0].row).toMatchObject({ flow_id: "flow-care", vars: { trigger_text: "track my order" } });
+    });
+  });
+
   it("never starts a keyword flow from a cart", async () => {
     h.state.flows = [{ ...KEYWORD_FLOW, trigger_config: { keywords: ["order"] } }];
     const result = await dispatch({ kind: "order", catalog_id: null, items: [], meta_message_id: "m4" });

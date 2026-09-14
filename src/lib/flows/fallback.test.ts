@@ -121,4 +121,25 @@ describe("decideFallback", () => {
       type: "handoff",
     });
   });
+
+  it("restarts the flow when on_exhaust='restart'", () => {
+    const policy: FlowFallbackPolicy = {
+      ...POLICY_REPROMPT_2_HANDOFF,
+      on_exhaust: "restart",
+    };
+    expect(decideFallback({ policy, reprompt_count: 2 })).toEqual({ type: "reprompt" });
+    expect(decideFallback({ policy, reprompt_count: 3 })).toEqual({ type: "restart" });
+  });
+});
+
+describe("resolveFallbackPolicy — options-only fields", () => {
+  it("keeps on_exhaust='restart' and a non-blank reprompt_text", () => {
+    expect(
+      resolveFallbackPolicy({ on_exhaust: "restart", reprompt_text: "  Tap an option.  " }),
+    ).toMatchObject({ on_exhaust: "restart", reprompt_text: "Tap an option." });
+  });
+
+  it("drops a blank reprompt_text", () => {
+    expect(resolveFallbackPolicy({ reprompt_text: "   " })).not.toHaveProperty("reprompt_text");
+  });
 });

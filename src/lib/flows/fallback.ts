@@ -23,6 +23,8 @@ export type FallbackAction =
   | { type: "handoff" }
   /** End the run with status='completed' (the `end` exhaust option). */
   | { type: "end" }
+  /** End the run and start the same flow again from its entry node. */
+  | { type: "restart" }
   /** Do nothing — the message wasn't for us. */
   | { type: "ignore" };
 
@@ -37,6 +39,10 @@ export function resolveFallbackPolicy(
 ): FlowFallbackPolicy {
   if (!raw || typeof raw !== "object") return DEFAULT_FALLBACK_POLICY;
   const r = raw as Partial<FlowFallbackPolicy>;
+  const repromptText =
+    typeof r.reprompt_text === "string" && r.reprompt_text.trim()
+      ? r.reprompt_text.trim()
+      : undefined;
   return {
     on_unknown_reply:
       r.on_unknown_reply === "handoff" ||
@@ -53,9 +59,12 @@ export function resolveFallbackPolicy(
         ? r.on_timeout_hours
         : DEFAULT_FALLBACK_POLICY.on_timeout_hours,
     on_exhaust:
-      r.on_exhaust === "handoff" || r.on_exhaust === "end"
+      r.on_exhaust === "handoff" ||
+      r.on_exhaust === "end" ||
+      r.on_exhaust === "restart"
         ? r.on_exhaust
         : DEFAULT_FALLBACK_POLICY.on_exhaust,
+    ...(repromptText ? { reprompt_text: repromptText } : {}),
   };
 }
 
@@ -85,7 +94,7 @@ export function decideFallback(args: {
   if (reprompt_count <= policy.max_reprompts) {
     return { type: "reprompt" };
   }
-  return policy.on_exhaust === "end"
-    ? { type: "end" }
-    : { type: "handoff" };
+  if (policy.on_exhaust === "end") return { type: "end" };
+  if (policy.on_exhaust === "restart") return { type: "restart" };
+  return { type: "handoff" };
 }
