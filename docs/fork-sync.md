@@ -27,19 +27,31 @@ This happened on the 2026-09-14 sync. The fork had applied
 and `042_message_failure_reason`. Resolution:
 
 1. Renumber the fork's migrations after upstream's highest
-   (`043_flow_integrations_catalog`, `044_flow_set_vars`). They are idempotent,
-   so running them again under the new number is harmless.
-2. Tell the database the old numbers were not upstream's:
+   (`043_flow_integrations_catalog`, `044_flow_set_vars`).
+2. Tell the database the old numbers were not upstream's, then push:
    ```bash
    supabase migration repair --status reverted 040 041
-   supabase db push --dry-run    # must list 040, 041, 042, 043, 044
+   supabase db push --dry-run    # listed 040, 041, 042, 043, 044
    supabase db push
    ```
-3. `supabase/ci/verify-schema.sql` asserts upstream's migrations actually took
-   effect; run it against the database after pushing.
+3. **043 then failed**, and this is the trap inside the trap. A migration that
+   drops and re-adds a CHECK is only safe to re-run if no row has since gained a
+   value the old CHECK forbids. 043's node-type CHECK predates `set_vars`, and
+   set_vars nodes already existed (044 had run as 041), so Postgres refused:
+   `check constraint "flow_nodes_node_type_check" ... is violated by some row`.
+   The migration's transaction rolled back, and production already had 043's
+   effects from its run as 040, so it was recorded rather than re-run:
+   ```bash
+   supabase migration repair --status applied 043
+   supabase db push              # applies 044, whose CHECK lists every type
+   ```
+4. `supabase/ci/verify-schema.sql` asserts upstream's migrations took effect;
+   check it, or query the new columns, after pushing.
 
-**Rule for future fork migrations:** keep them idempotent (`IF NOT EXISTS`,
-drop-and-recreate for CHECKs), so a renumbering like this is always safe.
+**Rule for future fork migrations:** number them well clear of upstream's
+sequence, and never assume a drop-and-recreate CHECK is re-runnable once later
+migrations have widened it - a fresh database runs them in order and is fine,
+but a renumbered replay against production is not.
 
 ## Translation catalogues
 
