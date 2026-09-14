@@ -463,35 +463,47 @@ async function findInterruptFlow(
   return null;
 }
 
-/** How long after a human agent's message the bot stays out of the way. */
-export const HUMAN_ACTIVE_WINDOW_MS = 12 * 60 * 60 * 1000;
+/** How long after a staff member's message the bot stays out of the way. */
+export const HUMAN_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+/** How long after the bot hands a chat to staff it waits before answering again. */
+export const HANDOFF_QUIET_WINDOW_MS = 30 * 60 * 1000;
 
 /**
- * Whether a person is handling this conversation, so a new bot run must not
- * start on the customer's next message.
+ * Whether a person is handling this conversation right now, so the customer's
+ * next message must not start a bot run.
  *
- * Without this, a handoff was undone by the customer's very next word: the
- * run had ended, so "hi" or "order" matched a keyword flow and the menu
- * appeared in the middle of a conversation with staff. A conversation still
- * `pending` after a handoff, or one where an agent wrote in the last twelve
- * hours, belongs to the human. Interrupt flows ("menu") still start, because
- * the customer is asking for the bot by name.
+ * Without any guard, a handoff was undone by the customer's next word: "hi"
+ * matched a keyword flow and the menu appeared mid-conversation with staff.
+ *
+ * The first version of this guard treated a `pending` conversation as
+ * human-owned with no time limit - and nothing ever moves a conversation out of
+ * `pending` except staff closing it. So a customer who tapped "Talk to our
+ * team" and got no reply was then ignored by the bot as well: "Hello", "Hi",
+ * "I need some help" all went unanswered (2026-09-14). Silence is the worst
+ * outcome, so ownership now expires:
+ *
+ *   - a staff message in the last hour, or
+ *   - a bot handoff in this conversation in the last half hour.
+ *
+ * Interrupt flows ("menu", "agent") start regardless.
  */
 async function humanIsHandling(db: AdminClient, conversationId: string): Promise<boolean> {
-  const { data: conversation } = await db
-    .from("conversations")
-    .select("status")
-    .eq("id", conversationId)
-    .maybeSingle();
-  if ((conversation as { status?: string } | null)?.status === "pending") return true;
-  const since = new Date(Date.now() - HUMAN_ACTIVE_WINDOW_MS).toISOString();
-  const { count } = await db
-    .from("messages")
-    .select("id", { count: "exact", head: true })
-    .eq("conversation_id", conversationId)
-    .eq("sender_type", "agent")
-    .gte("created_at", since);
-  return (count ?? 0) > 0;
+  const now = Date.now();
+  const [{ count: agentMessages }, { count: recentHandoffs }] = await Promise.all([
+    db
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conversationId)
+      .eq("sender_type", "agent")
+      .gte("created_at", new Date(now - HUMAN_ACTIVE_WINDOW_MS).toISOString()),
+    db
+      .from("flow_runs")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conversationId)
+      .eq("status", "handed_off")
+      .gte("ended_at", new Date(now - HANDOFF_QUIET_WINDOW_MS).toISOString()),
+  ]);
+  return (agentMessages ?? 0) > 0 || (recentHandoffs ?? 0) > 0;
 }
 
 // ============================================================

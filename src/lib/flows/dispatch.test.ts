@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
     conversations: [] as unknown[],
     /** What a count of recent agent messages returns. */
     agentMessageCount: 0,
+    /** What a count of recent bot handoffs in the conversation returns. */
+    recentHandoffCount: 0,
   },
 }));
 
@@ -76,7 +78,12 @@ vi.mock("./admin-client", () => {
         resolve({
           data: rows(table),
           error: null,
-          count: table === "messages" ? h.state.agentMessageCount : 0,
+          count:
+            table === "messages"
+              ? h.state.agentMessageCount
+              : table === "flow_runs"
+                ? h.state.recentHandoffCount
+                : 0,
         }),
     };
     return b;
@@ -171,6 +178,7 @@ beforeEach(() => {
   h.state.rpcCalls = [];
   h.state.conversations = [];
   h.state.agentMessageCount = 0;
+  h.state.recentHandoffCount = 0;
   engineSendText.mockClear();
 });
 
@@ -339,9 +347,9 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
     trigger_config: { keywords: ["menu"], match_type: "word", interrupt: true },
   };
 
-  it("does not start a bot run while a handed-off conversation waits for a person", async () => {
+  it("does not start a bot run just after it handed the conversation to a person", async () => {
     h.state.flows = [KEYWORD_FLOW];
-    h.state.conversations = [{ status: "pending" }];
+    h.state.recentHandoffCount = 1;
 
     const result = await dispatch({ kind: "text", text: "order status?", meta_message_id: "m1" });
 
@@ -351,7 +359,15 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
     expect(startedRuns()).toEqual([]);
   });
 
-  it("does not start a bot run for a few hours after an agent has written", async () => {
+  it("answers again once a pending handoff has gone quiet - it must not ignore the customer forever", async () => {
+    h.state.flows = [KEYWORD_FLOW];
+    // Pending, but no staff message in the last hour and no recent handoff:
+    // the 2026-09-14 case where "Hello", "Hi" and "I need some help" got nothing.
+    h.state.conversations = [{ status: "pending" }];
+    expect((await dispatch({ kind: "text", text: "order status", meta_message_id: "m1" })).consumed).toBe(true);
+  });
+
+  it("does not start a bot run shortly after an agent has written", async () => {
     h.state.flows = [KEYWORD_FLOW];
     h.state.conversations = [{ status: "open" }];
     h.state.agentMessageCount = 1;
@@ -361,7 +377,7 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
 
   it("still starts an interrupt flow the customer asks for by name", async () => {
     h.state.flows = [MENU_FLOW];
-    h.state.conversations = [{ status: "pending" }];
+    h.state.agentMessageCount = 1;
 
     const result = await dispatch({ kind: "text", text: "menu", meta_message_id: "m1" });
 
@@ -451,7 +467,7 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
 
     it("lets only the interrupt keyword through while a person is handling the chat", async () => {
       h.state.flows = [CARE_FLOW];
-      h.state.conversations = [{ status: "pending" }];
+      h.state.agentMessageCount = 1;
       expect((await dispatch({ kind: "text", text: "order", meta_message_id: "m8" })).consumed).toBe(false);
       expect((await dispatch({ kind: "text", text: "menu", meta_message_id: "m9" })).consumed).toBe(true);
     });
