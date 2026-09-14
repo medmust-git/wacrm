@@ -540,6 +540,45 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
       expect(startedRuns()).toEqual([]);
     });
 
+    it("takes a typed option name as the tap, so a customer typing 'Decipher' is not told off", async () => {
+      h.state.flows = [CATCH_ALL_FLOW];
+      h.state.nodes = [
+        ...NODES,
+        {
+          id: "n5",
+          flow_id: "flow-care",
+          node_key: "pick_product",
+          node_type: "send_dynamic_choices",
+          config: {
+            text: "Pick one",
+            button_label: "Products",
+            source: "prods.choices",
+            id_field: "id",
+            title_field: "title",
+            save_selection_as: "product_id",
+            next_node_key: "done",
+            empty_next: "done",
+          },
+        },
+      ];
+      h.state.activeRuns = [
+        {
+          ...WAITING,
+          current_node_key: "pick_product",
+          reprompt_count: 0,
+          vars: {
+            prods: { choices: [{ id: "decipher-iii", title: "DECIPHER III KUHS: Third" }, { id: "cns-kit", title: "CNS kit" }] },
+            __offer_pick_product: ["decipher-iii", "cns-kit"],
+          },
+        },
+      ];
+
+      const result = await dispatch({ kind: "text", text: "Decipher", meta_message_id: "c7" });
+
+      expect(result.outcome).not.toBe("fallback_fired");
+      expect(engineSendText).not.toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("tap") }));
+    });
+
     it("restarts the flow from its entry instead of handing off once reprompts run out", async () => {
       h.state.flows = [{ ...CATCH_ALL_FLOW, fallback_policy: { on_unknown_reply: "reprompt", max_reprompts: 1, on_timeout_hours: 2, on_exhaust: "restart" } }];
       h.state.nodes = BUTTON_NODES;

@@ -160,7 +160,28 @@ function resolvePlaceholder(expression: string, ctx: InterpolationContext): unkn
   if (expression.startsWith("vars.")) return readPath(ctx.vars, expression.slice(5));
   if (expression === "contact.phone") return ctx.contact?.phone ?? undefined;
   if (expression === "contact.name") return ctx.contact?.name ?? undefined;
+  if (expression === "contact.first_name") return firstName(ctx.contact?.name);
   return undefined;
+}
+
+const HONORIFICS = new Set(["dr", "mr", "mrs", "ms", "miss", "prof", "sir"]);
+
+/**
+ * The first name in a WhatsApp profile name, for a greeting - or undefined
+ * when there is nothing that reads as a name ("~", a phone number, emoji
+ * only), so a `{{contact.first_name|there}}` fallback takes over instead of
+ * "Hi 919876543210". A leading title is skipped: "Dr. Anjali" greets Anjali.
+ */
+export function firstName(name: string | null | undefined): string | undefined {
+  const words = (name ?? "")
+    .split(/\s+/)
+    .map((word) => word.replace(/[^\p{L}'-]/gu, ""))
+    .filter((word) => /\p{L}{2,}/u.test(word));
+  const first = words.find((word) => !HONORIFICS.has(word.toLowerCase()));
+  if (!first || first.length > 20) return undefined;
+  return first === first.toUpperCase() || first === first.toLowerCase()
+    ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase()
+    : first;
 }
 
 function stringify(value: unknown): string {
@@ -169,7 +190,13 @@ function stringify(value: unknown): string {
   return String(value);
 }
 
-const PLACEHOLDER = /\{\{\s*(json:)?((?:vars\.[a-zA-Z0-9_.]+)|contact\.(?:phone|name))\s*\}\}/g;
+// `{{expr|fallback}}` renders the fallback when the value is empty, e.g.
+// `Hi {{contact.first_name|there}}`.
+const PLACEHOLDER = /\{\{\s*(json:)?((?:vars\.[a-zA-Z0-9_.]+)|contact\.(?:phone|name|first_name))\s*(?:\|([^{}]*))?\}\}/g;
+
+function valueOr(value: unknown, fallback: string | undefined): unknown {
+  return fallback !== undefined && stringify(value) === "" ? fallback.trim() : value;
+}
 
 /**
  * Fills `{{vars.a.b}}`, `{{contact.phone}}` and `{{contact.name}}` in text.
@@ -178,13 +205,15 @@ const PLACEHOLDER = /\{\{\s*(json:)?((?:vars\.[a-zA-Z0-9_.]+)|contact\.(?:phone|
  */
 export function interpolateTemplate(template: string | undefined, ctx: InterpolationContext): string {
   if (!template) return "";
-  return template.replace(PLACEHOLDER, (_match, _json, expression: string) => stringify(resolvePlaceholder(expression, ctx)));
+  return template.replace(PLACEHOLDER, (_match, _json, expression: string, fallback?: string) =>
+    stringify(valueOr(resolvePlaceholder(expression, ctx), fallback)),
+  );
 }
 
 /** As `interpolateTemplate`, but every value is URL-encoded. For URLs. */
 export function interpolateUrl(template: string, ctx: InterpolationContext): string {
-  return template.replace(PLACEHOLDER, (_match, _json, expression: string) =>
-    encodeURIComponent(stringify(resolvePlaceholder(expression, ctx))),
+  return template.replace(PLACEHOLDER, (_match, _json, expression: string, fallback?: string) =>
+    encodeURIComponent(stringify(valueOr(resolvePlaceholder(expression, ctx), fallback))),
   );
 }
 
@@ -194,8 +223,8 @@ export function interpolateUrl(template: string, ctx: InterpolationContext): str
  * the string and add fields. `{{json:vars.x}}` inserts raw JSON.
  */
 export function interpolateJsonBody(template: string, ctx: InterpolationContext): string {
-  return template.replace(PLACEHOLDER, (_match, json: string | undefined, expression: string) => {
-    const value = resolvePlaceholder(expression, ctx);
+  return template.replace(PLACEHOLDER, (_match, json: string | undefined, expression: string, fallback?: string) => {
+    const value = valueOr(resolvePlaceholder(expression, ctx), fallback);
     if (json) return JSON.stringify(value ?? null);
     return JSON.stringify(stringify(value)).slice(1, -1);
   });
@@ -385,6 +414,37 @@ export function planDynamicChoices(cfg: SendDynamicChoicesNodeConfig, vars: Reco
       ...(option.description ? { description: clip(option.description, LIST_ROW_DESCRIPTION_MAX) } : {}),
     })),
   };
+}
+
+/** Lowercased letters and digits only, words single-spaced. */
+function normaliseForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/**
+ * Which option a TYPED reply means, for customers who type the option instead
+ * of tapping it ("MBBS", "3rd year", "decipher").
+ *
+ * Matches, in order: the whole title; then a title containing every typed word
+ * (3+ letters, or any digit) - but only when exactly one title does, so
+ * "cns" with two CNS kits on offer asks again rather than guessing. Returns the
+ * option id, or null.
+ */
+export function matchTypedOption(options: ReadonlyArray<{ id: string; title: string }>, typed: string): string | null {
+  const text = normaliseForMatch(typed);
+  if (!text || text.length > 60) return null;
+  const exact = options.filter((option) => normaliseForMatch(option.title) === text);
+  if (exact.length === 1) return exact[0].id;
+  const words = text.split(" ").filter((word) => word.length >= 3 || /\d/.test(word));
+  if (!words.length) return null;
+  const partial = options.filter((option) => {
+    const title = normaliseForMatch(option.title);
+    return words.every((word) => title.includes(word));
+  });
+  return partial.length === 1 ? partial[0].id : null;
 }
 
 export type DynamicReplyMatch =

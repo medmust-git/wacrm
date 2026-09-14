@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyIntegrationEdge,
   executeHttpFetch,
+  firstName,
   integrationEdges,
   interpolateJsonBody,
   interpolateTemplate,
   interpolateUrl,
   matchDynamicReply,
+  matchTypedOption,
   offerVarKey,
   planDynamicChoices,
   readPath,
@@ -198,5 +200,33 @@ describe("integration edges", () => {
     expect(unlinked?.next_node_key).toBe("a");
     expect((unlinked?.extra_rows as Array<{ next_node_key: string }>)[0].next_node_key).toBe("");
     expect(unlinkIntegrationReferences(node, "nothing")).toBeNull();
+  });
+});
+
+describe("friendly personalisation and typed replies", () => {
+  it("greets by first name, skipping titles and non-names, with a fallback", () => {
+    expect(firstName("Dr. ANJALI Menon")).toBe("Anjali");
+    expect(firstName("Rahul K")).toBe("Rahul");
+    expect(firstName("919876543210")).toBeUndefined();
+    expect(firstName("~ 🌸")).toBeUndefined();
+    const ctx = { vars: {}, contact: { phone: "+91", name: "919876543210" } };
+    expect(interpolateTemplate("Hi {{contact.first_name|there}}!", ctx)).toBe("Hi there!");
+    expect(interpolateTemplate("Hi {{contact.first_name|there}}!", { vars: {}, contact: { phone: null, name: "meera" } })).toBe("Hi Meera!");
+    expect(interpolateTemplate("{{vars.missing | none}}", { vars: {} })).toBe("none");
+  });
+
+  it("matches a typed reply to exactly one option", () => {
+    const options = [
+      { id: "a", title: "DECIPHER III KUHS: Third" },
+      { id: "b", title: "CNS kit - Personalized" },
+      { id: "c", title: "CNS Kit Plus" },
+      { id: "d", title: "3rd year" },
+    ];
+    expect(matchTypedOption(options, "Decipher")).toBe("a");
+    expect(matchTypedOption(options, "cns kit plus")).toBe("c");
+    expect(matchTypedOption(options, "CNS")).toBeNull();
+    expect(matchTypedOption(options, "3")).toBe("d");
+    expect(matchTypedOption(options, "ok")).toBeNull();
+    expect(matchTypedOption([{ id: "q1", title: "1" }, { id: "q2", title: "2" }], "2")).toBe("q2");
   });
 });

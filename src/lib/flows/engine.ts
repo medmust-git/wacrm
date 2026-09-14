@@ -45,6 +45,7 @@ import {
   executeHttpFetch,
   interpolateTemplate,
   matchDynamicReply,
+  matchTypedOption,
   offerVarKey,
   planDynamicChoices,
   readPath,
@@ -103,6 +104,32 @@ export function matchReplyId(
       if (hit) return hit.next_node_key;
     }
     return null;
+  }
+  return null;
+}
+
+/**
+ * The reply id a typed message stands for on an interactive node, or null.
+ * Dynamic choices are re-planned from the run's vars, which still hold the
+ * source list, so the titles compared are exactly the ones the customer saw.
+ */
+export function typedReplyId(
+  node: { node_key: string; node_type: string; config: Record<string, unknown> },
+  vars: Record<string, unknown>,
+  text: string,
+): string | null {
+  if (node.node_type === "send_buttons") {
+    const cfg = node.config as unknown as SendButtonsNodeConfig;
+    return matchTypedOption((cfg.buttons ?? []).map((b) => ({ id: b.reply_id, title: b.title })), text);
+  }
+  if (node.node_type === "send_list") {
+    const cfg = node.config as unknown as SendListNodeConfig;
+    const rows = (cfg.sections ?? []).flatMap((section) => section.rows ?? []);
+    return matchTypedOption(rows.map((r) => ({ id: r.reply_id, title: r.title })), text);
+  }
+  if (node.node_type === "send_dynamic_choices") {
+    const plan = planDynamicChoices(node.config as unknown as SendDynamicChoicesNodeConfig, vars);
+    return plan.kind === "empty" ? null : matchTypedOption(plan.options, text);
   }
   return null;
 }
@@ -1390,6 +1417,27 @@ async function handleReplyForActiveRun(
       matched = hit.next;
     } else if (hit?.kind === "extra") {
       matched = hit.next;
+    }
+  } else if (
+    message.kind === "text" &&
+    (currentNode.node_type === "send_buttons" ||
+      currentNode.node_type === "send_list" ||
+      currentNode.node_type === "send_dynamic_choices")
+  ) {
+    // Typed instead of tapped: accept it when it names exactly one option.
+    const replyId = typedReplyId(currentNode, run.vars, message.text);
+    if (replyId && currentNode.node_type === "send_dynamic_choices") {
+      const hit = matchDynamicReply(currentNode, run.vars, replyId);
+      if (hit?.kind === "item") {
+        const cfg = currentNode.config as unknown as SendDynamicChoicesNodeConfig;
+        await saveVars(db, run, { [cfg.save_selection_as]: hit.selection });
+      }
+      matched = hit?.next ?? null;
+    } else if (replyId) {
+      matched = matchReplyId(currentNode, replyId);
+    }
+    if (matched) {
+      await logEvent(db, run.id, "node_entered", currentNode.node_key, { typed_option: replyId });
     }
   } else if (
     message.kind === "text" &&
