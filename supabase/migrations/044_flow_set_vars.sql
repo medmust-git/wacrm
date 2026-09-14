@@ -1,12 +1,14 @@
 -- ============================================================
--- 041_flow_set_vars.sql
+-- 044_flow_set_vars.sql
+--
+-- Numbered 044 after the 2026-09-14 upstream sync; applied earlier as 041.
 --
 -- flow_nodes.node_type gains 'set_vars': sets run variables from templates.
 -- Lets branches converge - an order picked from a list and an order found
 -- by typed number land in different variables, and the steps after them
 -- should read one.
 --
--- Idempotent; drops and re-adds the CHECK as 010, 016 and 040 do.
+-- Idempotent; drops and re-adds the CHECK as 010, 016 and 043 do.
 -- ============================================================
 
 ALTER TABLE flow_nodes

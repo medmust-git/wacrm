@@ -1,5 +1,9 @@
 -- ============================================================
--- 040_flow_integrations_catalog.sql
+-- 043_flow_integrations_catalog.sql
+--
+-- Numbered 043, after upstream's 040-042. It was applied as 040 before the
+-- 2026-09-14 upstream sync, when upstream shipped its own 040; see
+-- docs/fork-sync.md for the migration-history repair that sync needed.
 --
 -- Lets a flow talk to an external system and show a store catalogue.
 --

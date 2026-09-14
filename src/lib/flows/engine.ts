@@ -518,15 +518,26 @@ async function sendButtonsAndSuspend(
   node: FlowNodeRow,
 ): Promise<{ outcome: "advanced"; node_key: string }> {
   const cfg = node.config as unknown as SendButtonsNodeConfig;
+  // Every customer-visible string is interpolated against run.vars —
+  // same treatment send_message / collect_input already get (#553).
+  // `reply_id` is deliberately NOT interpolated: it is the routing key
+  // matchReplyId compares the tapped button against, so it must reach
+  // Meta byte-for-byte as authored. Interpolation can push a title past
+  // Meta's 20-char cap; meta-api's validator throws a descriptive error
+  // and the caller logs it — we never truncate silently.
+  const ctx = await contextFor(db, run);
   const { whatsapp_message_id } = await engineSendInteractiveButtons({
     accountId: run.account_id,
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: await fill(db, run, cfg.text),
-    headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
-    footerText: cfg.footer_text,
-    buttons: cfg.buttons.map((b) => ({ id: b.reply_id, title: b.title })),
+    bodyText: interpolateTemplate(cfg.text, ctx),
+    headerText: interpolateOptionalVars(cfg.header_text, ctx),
+    footerText: interpolateOptionalVars(cfg.footer_text, ctx),
+    buttons: cfg.buttons.map((b) => ({
+      id: b.reply_id,
+      title: interpolateTemplate(b.title, ctx),
+    })),
   });
   await logEvent(db, run.id, "message_sent", node.node_key, {
     node_type: "send_buttons",
@@ -554,21 +565,24 @@ async function sendListAndSuspend(
   node: FlowNodeRow,
 ): Promise<{ outcome: "advanced"; node_key: string }> {
   const cfg = node.config as unknown as SendListNodeConfig;
+  // See sendButtonsAndSuspend — interpolate every visible string,
+  // never the row `reply_id`.
+  const ctx = await contextFor(db, run);
   const { whatsapp_message_id } = await engineSendInteractiveList({
     accountId: run.account_id,
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: await fill(db, run, cfg.text),
-    buttonLabel: cfg.button_label,
-    headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
-    footerText: cfg.footer_text,
+    bodyText: interpolateTemplate(cfg.text, ctx),
+    buttonLabel: interpolateTemplate(cfg.button_label, ctx),
+    headerText: interpolateOptionalVars(cfg.header_text, ctx),
+    footerText: interpolateOptionalVars(cfg.footer_text, ctx),
     sections: cfg.sections.map((s) => ({
-      title: s.title,
+      title: interpolateOptionalVars(s.title, ctx),
       rows: s.rows.map((r) => ({
         id: r.reply_id,
-        title: r.title,
-        description: r.description,
+        title: interpolateTemplate(r.title, ctx),
+        description: interpolateOptionalVars(r.description, ctx),
       })),
     })),
   });
@@ -759,6 +773,23 @@ async function saveVars(db: AdminClient, run: FlowRunRow, patch: Record<string, 
   const { error } = await db.from("flow_runs").update({ vars: next }).eq("id", run.id);
   if (error) throw new Error(`saving run vars failed: ${error.message}`);
   run.vars = next;
+}
+
+/**
+ * `interpolateTemplate` for optional config fields (header_text, footer_text,
+ * list section titles, row descriptions). An absent field stays absent
+ * — interpolating `undefined` would return "" and meta-api treats
+ * header/footer/description by truthiness, so "" is harmless there, but
+ * keeping `undefined` means the payload we log and send matches what
+ * the author configured rather than sprouting empty strings.
+ */
+function interpolateOptionalVars(
+  template: string | undefined,
+  ctx: InterpolationContext,
+): string | undefined {
+  return template === undefined || template === null
+    ? undefined
+    : interpolateTemplate(template, ctx);
 }
 
 async function endRun(
@@ -1089,7 +1120,23 @@ async function advanceFromNodeKey(
       return { outcome: "advanced" };
     }
     if (node.node_type === "send_buttons") {
-      await sendButtonsAndSuspend(db, run, node);
+      // Same failure contract as send_message / send_media /
+      // collect_input above: log + fail the run. Previously an
+      // exception here (Meta error, or meta-api's length validation —
+      // now reachable via interpolation, see sendButtonsAndSuspend)
+      // escaped to dispatchInboundToFlows' catch, which only
+      // console.error'd and left the run active + stuck on the prior
+      // node with nothing in flow_run_events.
+      try {
+        await sendButtonsAndSuspend(db, run, node);
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "send_buttons_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "send_buttons_failed");
+        return { outcome: "completed" };
+      }
       // Persist the new current_node_key via optimistic UPDATE.
       const advanced = await advanceCurrentNodeKey(
         db,
@@ -1105,7 +1152,16 @@ async function advanceFromNodeKey(
       return { outcome: "advanced" };
     }
     if (node.node_type === "send_list") {
-      await sendListAndSuspend(db, run, node);
+      try {
+        await sendListAndSuspend(db, run, node);
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "send_list_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "send_list_failed");
+        return { outcome: "completed" };
+      }
       const advanced = await advanceCurrentNodeKey(
         db,
         run.id,
@@ -1399,37 +1455,34 @@ async function handleReplyForActiveRun(
   }
   if (action.type === "reprompt") {
     // Re-send the same prompt. Same node, no current_node_key change.
-    if (currentNode.node_type === "send_buttons") {
-      await sendButtonsAndSuspend(db, run, currentNode);
-    } else if (currentNode.node_type === "send_list") {
-      await sendListAndSuspend(db, run, currentNode);
-    } else if (currentNode.node_type === "send_dynamic_choices") {
-      try {
+    // The interactive helpers interpolate run.vars themselves, so a
+    // reprompt renders the same text the original prompt did. A send
+    // failure here is logged but does not end the run — the customer
+    // still has the original prompt on screen and can retry.
+    try {
+      if (currentNode.node_type === "send_buttons") {
+        await sendButtonsAndSuspend(db, run, currentNode);
+      } else if (currentNode.node_type === "send_list") {
+        await sendListAndSuspend(db, run, currentNode);
+      } else if (currentNode.node_type === "send_dynamic_choices") {
         await sendDynamicChoicesAndSuspend(db, run, currentNode);
-      } catch (err) {
-        await logEvent(db, run.id, "error", currentNode.node_key, {
-          reason: "reprompt_send_failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } else if (currentNode.node_type === "collect_input") {
-      // Customer typed something we couldn't accept (empty after trim,
-      // or var_key missing — rare). Re-send the prompt so they try again.
-      const cfg = currentNode.config as unknown as CollectInputNodeConfig;
-      try {
+      } else if (currentNode.node_type === "collect_input") {
+        // Customer typed something we couldn't accept (empty after trim,
+        // or var_key missing — rare). Re-send the prompt so they try again.
+        const cfg = currentNode.config as unknown as CollectInputNodeConfig;
         await engineSendText({
           accountId: run.account_id,
-    userId: run.user_id,
+          userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           text: await fill(db, run, cfg.prompt_text),
         });
-      } catch (err) {
-        await logEvent(db, run.id, "error", currentNode.node_key, {
-          reason: "reprompt_send_failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
       }
+    } catch (err) {
+      await logEvent(db, run.id, "error", currentNode.node_key, {
+        reason: "reprompt_send_failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
     }
     return { consumed: true, flow_run_id: run.id, outcome: "fallback_fired" };
   }
