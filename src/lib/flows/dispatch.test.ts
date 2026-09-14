@@ -592,6 +592,44 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
     });
   });
 
+  describe("friendlier entry: media, small talk and greeting context", () => {
+    const MEDIA_FLOW = { ...KEYWORD_FLOW, id: "flow-media", trigger_config: { keywords: ["voice note"], match_type: "exact", on_media: true } };
+    const THANKS_FLOW = {
+      ...KEYWORD_FLOW,
+      id: "flow-thanks",
+      trigger_config: { keywords: ["thanks", "ok"], match_type: "exact", interrupt_keywords: ["thanks"], quiet_when_human: true },
+    };
+
+    it("starts the media flow for a voice note, with the kind in vars", async () => {
+      h.state.flows = [KEYWORD_FLOW, MEDIA_FLOW];
+      const result = await dispatch({ kind: "media", media_type: "audio", meta_message_id: "d1" });
+      expect(result.consumed).toBe(true);
+      expect(startedRuns()[0].row).toMatchObject({ flow_id: "flow-media", vars: { media_type: "audio" } });
+    });
+
+    it("leaves media alone when no flow asked for it", async () => {
+      h.state.flows = [{ ...KEYWORD_FLOW, trigger_config: { keywords: ["x"], catch_all: true } }];
+      expect((await dispatch({ kind: "media", media_type: "image", meta_message_id: "d2" })).consumed).toBe(false);
+    });
+
+    it("does not answer a photo sent to staff", async () => {
+      h.state.flows = [MEDIA_FLOW];
+      h.state.agentMessageCount = 1;
+      expect((await dispatch({ kind: "media", media_type: "image", meta_message_id: "d3" })).consumed).toBe(false);
+    });
+
+    it("matches an exact keyword despite trailing punctuation", async () => {
+      h.state.flows = [THANKS_FLOW];
+      expect((await dispatch({ kind: "text", text: "Thanks!!", meta_message_id: "d4" })).consumed).toBe(true);
+    });
+
+    it("keeps a quiet_when_human interrupt from answering a customer thanking staff", async () => {
+      h.state.flows = [THANKS_FLOW];
+      h.state.agentMessageCount = 1;
+      expect((await dispatch({ kind: "text", text: "thanks", meta_message_id: "d5" })).consumed).toBe(false);
+    });
+  });
+
   it("never starts a keyword flow from a cart", async () => {
     h.state.flows = [{ ...KEYWORD_FLOW, trigger_config: { keywords: ["order"] } }];
     const result = await dispatch({ kind: "order", catalog_id: null, items: [], meta_message_id: "m4" });

@@ -149,10 +149,12 @@ export function matchesKeywordTrigger(
     return cfg.keywords.some((raw) => Boolean(raw) && matchesWholeWord(text, raw, cfg.case_sensitive));
   }
   const haystack = cfg.case_sensitive ? text : text.toLowerCase();
+  // "Thanks!" and "ok." are the exact keyword "thanks" / "ok" to a customer.
+  const exactHaystack = haystack.trim().replace(/[\s.,!?]+$/u, "");
   for (const raw of cfg.keywords) {
     if (!raw) continue;
     const needle = cfg.case_sensitive ? raw : raw.toLowerCase();
-    if (matchType === "exact" ? haystack === needle : haystack.includes(needle)) {
+    if (matchType === "exact" ? exactHaystack === needle.trim() : haystack.includes(needle)) {
       return true;
     }
   }
@@ -177,7 +179,7 @@ export function matchesKeywordTrigger(
 export function entryTriggerTexts(message: ParsedInbound): string[] {
   if (message.kind === "text") return [message.text];
   // A cart carries no words to match; it starts `order_message` flows only.
-  if (message.kind === "order") return [];
+  if (message.kind === "order" || message.kind === "media") return [];
   return [...new Set([message.reply_title, message.reply_id])].filter(
     (v): v is string => Boolean(v && v.trim()),
   );
@@ -422,6 +424,16 @@ async function findEntryFlow(
   if (error || !flows) return null;
 
   const typed = flows as FlowRow[];
+  if (message.kind === "media") {
+    // Media only starts a flow that asked for it; no keyword can match it.
+    return (
+      typed.find(
+        (flow) =>
+          flow.trigger_type === "keyword" &&
+          (flow.trigger_config as KeywordTriggerConfig)?.on_media === true,
+      ) ?? null
+    );
+  }
   for (const flow of typed) {
     if (message.kind === "order") {
       // A cart starts an `order_message` flow and nothing else - a keyword
@@ -1339,6 +1351,7 @@ export async function dispatchInboundToFlows(
       // Only an explicit request for the bot ("menu") overrides a person.
       const askedForBot =
         isInterruptFlow(flow) &&
+        (flow.trigger_config as KeywordTriggerConfig)?.quiet_when_human !== true &&
         entryTriggerTexts(input.message).some((text) =>
           matchesKeywordTrigger(text, interruptTriggerConfig(flow.trigger_config as KeywordTriggerConfig)),
         );
@@ -1375,6 +1388,7 @@ async function handleReplyForActiveRun(
     reply_id: message.kind === "interactive_reply" ? message.reply_id : null,
     text_length: message.kind === "text" ? message.text.length : null,
     order_items: message.kind === "order" ? message.items.length : null,
+    media_type: message.kind === "media" ? message.media_type : null,
   });
 
   if (!run.current_node_key) {
@@ -1571,11 +1585,54 @@ async function handleReplyForActiveRun(
     // reply, so a menu flow that routes on intent still sends a customer who
     // typed "track my order" at a product list straight to tracking.
     await endRun(db, run.id, "completed", "fallback_restart");
-    return startNewRun(db, runFlow, input, nodes);
+    return startNewRun(db, runFlow, input, nodes, { restarted: true });
   }
   // action.type === 'end' (or a restart of a flow with no entry node)
   await endRun(db, run.id, "completed", "fallback_exhausted_end");
   return { consumed: true, flow_run_id: run.id, outcome: "completed" };
+}
+
+/** Whole hours from an ISO timestamp to now, or null for a missing or bad one. */
+export function wholeHoursSince(iso: string | null | undefined, now = Date.now()): number | null {
+  const at = Date.parse(iso ?? "");
+  return Number.isFinite(at) ? Math.max(0, Math.floor((now - at) / 3_600_000)) : null;
+}
+
+/**
+ * Facts about this contact a flow can greet with, seeded into a new run's vars:
+ *
+ * - `hours_since_last_chat`: whole hours since the contact's previous run last
+ *   moved, absent for a first chat - so a menu can say "welcome back" to
+ *   someone who was here this morning instead of introducing itself again.
+ * - `restarted: "yes"` when the run replaces one the customer could not
+ *   answer, so the greeting is "let's start again", not "welcome".
+ * - `media_type` for a run started by a photo, voice note or file.
+ *
+ * A failed lookup seeds nothing; greeting copy must read fine without it.
+ */
+async function runStartContext(
+  db: AdminClient,
+  accountId: string,
+  input: DispatchInboundInput,
+  options: { restarted?: boolean },
+): Promise<Record<string, string>> {
+  const context: Record<string, string> = {};
+  if (options.restarted) context.restarted = "yes";
+  if (input.message.kind === "media") context.media_type = input.message.media_type;
+  try {
+    const { data } = await db
+      .from("flow_runs")
+      .select("last_advanced_at")
+      .eq("account_id", accountId)
+      .eq("contact_id", input.contactId)
+      .order("started_at", { ascending: false })
+      .limit(1);
+    const hours = wholeHoursSince((data as Array<{ last_advanced_at?: string }> | null)?.[0]?.last_advanced_at);
+    if (hours !== null) context.hours_since_last_chat = String(hours);
+  } catch {
+    // Greeting context is a nicety; never block a run on it.
+  }
+  return context;
 }
 
 async function startNewRun(
@@ -1583,7 +1640,9 @@ async function startNewRun(
   flow: FlowRow,
   input: DispatchInboundInput,
   nodes: Map<string, FlowNodeRow>,
+  options: { restarted?: boolean } = {},
 ): Promise<DispatchInboundResult> {
+  const context = await runStartContext(db, flow.account_id, input, options);
   // INSERT — partial unique index `idx_one_active_run_per_contact`
   // catches concurrent inserts with 23505. We catch and return as
   // consumed:true (the parallel webhook handles it).
@@ -1614,6 +1673,7 @@ async function startNewRun(
               // tracking instead of showing the menu first. Condition
               // `contains` is case-sensitive, hence the lowercasing.
               trigger_text: entryTriggerTexts(input.message).join(" ").toLowerCase().slice(0, 500),
+              ...context,
             },
     })
     .select("*")

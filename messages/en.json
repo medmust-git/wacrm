@@ -943,6 +943,10 @@
           "label": "Conversation Assigned",
           "hint": "When assigned to an agent"
         },
+        "conversation_closed": {
+          "label": "Conversation Closed",
+          "hint": "When staff close a conversation they replied in within the last day"
+        },
         "tag_added": {
           "label": "Tag Added",
           "hint": "When a tag is added to a contact"

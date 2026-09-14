@@ -625,3 +625,14 @@ describe("send_buttons / send_list interpolate {{vars.*}} (#553)", () => {
     );
   });
 });
+
+describe("wholeHoursSince", () => {
+  it("counts whole hours and rejects missing values", async () => {
+    const { wholeHoursSince } = await import("./engine");
+    const now = Date.parse("2026-09-14T12:00:00Z");
+    expect(wholeHoursSince("2026-09-14T08:59:00Z", now)).toBe(3);
+    expect(wholeHoursSince("2026-09-14T13:00:00Z", now)).toBe(0);
+    expect(wholeHoursSince(null, now)).toBeNull();
+    expect(wholeHoursSince("nope", now)).toBeNull();
+  });
+});

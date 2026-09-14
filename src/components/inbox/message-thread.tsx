@@ -644,11 +644,14 @@ export function MessageThread({
     async (status: ConversationStatus) => {
       if (!conversation) return;
 
-      const supabase = createClient();
-      await supabase
-        .from("conversations")
-        .update({ status })
-        .eq("id", conversation.id);
+      // Through the API, not a direct write: closing can fire the
+      // conversation_closed automation (the "how did we do?" message).
+      const response = await fetch(`/api/conversations/${conversation.id}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!response.ok) return;
 
       onStatusChange(conversation.id, status);
     },

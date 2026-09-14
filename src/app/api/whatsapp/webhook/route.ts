@@ -904,6 +904,14 @@ async function processMessage(
             items: inboundOrderItems(message),
             meta_message_id: message.id,
           }
+        : isCaptionlessMedia(message)
+        ? {
+            // No caption: nothing to read, so it reaches flows as media
+            // rather than as an empty text a menu would answer.
+            kind: 'media',
+            media_type: message.type as 'image' | 'audio' | 'video' | 'document' | 'sticker',
+            meta_message_id: message.id,
+          }
         : interactiveReplyId
         ? {
             kind: 'interactive_reply',
@@ -1492,4 +1500,24 @@ async function findOrCreateConversation(
   }
 
   return { conversation: newConv, created: true }
+}
+
+/**
+ * A photo, voice note, video, file or sticker with no caption. A document's
+ * filename is not a caption: "IMG_2044.pdf" is not something the customer said.
+ */
+function isCaptionlessMedia(message: WhatsAppMessage): boolean {
+  switch (message.type) {
+    case 'image':
+      return !message.image?.caption
+    case 'video':
+      return !message.video?.caption
+    case 'document':
+      return !message.document?.caption
+    case 'audio':
+    case 'sticker':
+      return true
+    default:
+      return false
+  }
 }

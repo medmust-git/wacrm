@@ -250,6 +250,18 @@ export interface KeywordTriggerConfig {
    * applies, so it never talks over staff.
    */
   catch_all?: boolean;
+  /**
+   * When true, this flow also starts on a photo, voice note, video or file
+   * sent with no caption while nothing is running - so "thanks, our team will
+   * look at it" goes back instead of silence. `vars.media_type` holds the kind.
+   */
+  on_media?: boolean;
+  /**
+   * When true, even this flow's interrupt keywords stay quiet while a person
+   * is handling the chat. For small talk ("thanks") that must not answer a
+   * customer thanking a staff member.
+   */
+  quiet_when_human?: boolean;
 }
 
 // No knobs in v1 — the trigger has a single semantic. Kept as a type
@@ -380,6 +392,12 @@ export type ParsedInbound =
       reply_id: string;
       /** The visible title of the tapped option (for logging). */
       reply_title: string;
+      meta_message_id: string;
+    }
+  | {
+      /** A photo, voice note, video, file or sticker with no caption. */
+      kind: "media";
+      media_type: "image" | "audio" | "video" | "document" | "sticker";
       meta_message_id: string;
     }
   | {

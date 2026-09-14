@@ -943,6 +943,10 @@
           "label": "Conversa atribuída",
           "hint": "Quando atribuída a um agente"
         },
+        "conversation_closed": {
+          "label": "Conversa encerrada",
+          "hint": "Quando a equipe encerra uma conversa em que respondeu no último dia"
+        },
         "tag_added": {
           "label": "Tag adicionada",
           "hint": "Quando uma tag é adicionada a um contato"

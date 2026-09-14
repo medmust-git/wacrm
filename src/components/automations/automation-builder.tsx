@@ -145,6 +145,7 @@ const TRIGGER_OPTIONS: { value: AutomationTriggerType }[] = [
   { value: "interactive_reply" },
   { value: "new_contact_created" },
   { value: "conversation_assigned" },
+  { value: "conversation_closed" },
   { value: "tag_added" },
   { value: "time_based" },
 ]
