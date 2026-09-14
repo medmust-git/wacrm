@@ -304,6 +304,9 @@ function TriggerPanel({
               <SelectItem value="manual">
                 {t('triggerManualTitle')}
               </SelectItem>
+              <SelectItem value="order_message">
+                {t('triggerOrderMessageTitle')}
+              </SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -589,6 +592,9 @@ function AddNodeButton({ onAdd, t }: { onAdd: (type: NodeType) => void; t: Retur
     'collect_input',
     'condition',
     'set_tag',
+    'http_fetch',
+    'send_dynamic_choices',
+    'send_products',
     'handoff',
     'end',
   ];

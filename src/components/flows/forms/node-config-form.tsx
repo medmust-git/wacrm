@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { uploadAccountMedia, MEDIA_MAX_BYTES } from "@/lib/storage/upload-media";
+import { applyIntegrationEdge, integrationEdges } from "@/lib/flows/integrations";
 import { slugify, type BuilderNode } from "../shared";
 import { NextNodeRow, NodeKeySelect, TextRow } from "./fields";
 
@@ -205,6 +206,18 @@ export function NodeConfigForm({
         />
       );
 
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      return (
+        <IntegrationConfigForm
+          node={node}
+          allNodes={allNodes}
+          onUpdateConfig={onUpdateConfig}
+          t={t}
+        />
+      );
+
     case "end":
       return (
         <p className="text-xs text-muted-foreground">
@@ -212,6 +225,93 @@ export function NodeConfigForm({
         </p>
       );
   }
+}
+
+// ============================================================
+// http_fetch / send_dynamic_choices / send_products
+// ============================================================
+
+/**
+ * A JSON editor plus one next-node picker per outgoing edge.
+ *
+ * These nodes carry nested config - request headers, a JSON body template,
+ * field mappings, extra rows - that a form of individual inputs would bury.
+ * JSON is edited as text and applied only while it parses, so a half-typed
+ * brace never wipes the node's saved config. The edge pickers stay as real
+ * selects, because a mistyped node key is the error most worth preventing.
+ * Field reference: `src/lib/flows/integrations.ts`.
+ */
+function IntegrationConfigForm({
+  node,
+  allNodes,
+  onUpdateConfig,
+  t,
+}: {
+  node: BuilderNode;
+  allNodes: BuilderNode[];
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+  t: ReturnType<typeof useTranslations>;
+}) {
+  const serialised = JSON.stringify(node.config, null, 2);
+  const [draft, setDraft] = useState(serialised);
+  const [invalid, setInvalid] = useState(false);
+  // Re-sync when the config changes from outside this editor (an edge picker
+  // below, a canvas drag-to-connect) - but not while the author is mid-edit
+  // on text that does not parse yet.
+  const lastApplied = useRef(serialised);
+  useEffect(() => {
+    if (serialised !== lastApplied.current) {
+      lastApplied.current = serialised;
+      setDraft(serialised);
+      setInvalid(false);
+    }
+  }, [serialised]);
+
+  const edges = integrationEdges(node) ?? [];
+  return (
+    <>
+      <div>
+        <label className="mb-1 block text-xs text-muted-foreground">{t("integrationConfigLabel")}</label>
+        <textarea
+          className={cn(
+            "min-h-[220px] w-full rounded-md border bg-muted p-2 font-mono text-xs",
+            invalid ? "border-destructive" : "border-border",
+          )}
+          spellCheck={false}
+          value={draft}
+          onChange={(event) => {
+            const text = event.target.value;
+            setDraft(text);
+            try {
+              const parsed: unknown = JSON.parse(text);
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+              setInvalid(false);
+              lastApplied.current = JSON.stringify(parsed, null, 2);
+              onUpdateConfig(parsed as Record<string, unknown>);
+            } catch {
+              setInvalid(true);
+            }
+          }}
+        />
+        <p className={cn("mt-1 text-[10px]", invalid ? "text-destructive" : "text-muted-foreground")}>
+          {invalid ? t("integrationConfigInvalid") : t("integrationConfigHelp")}
+        </p>
+      </div>
+      {edges.map((edge) => (
+        <NextNodeRow
+          key={edge.slot}
+          value={edge.target ?? ""}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onChange={(value) => {
+            const patch = applyIntegrationEdge(node, edge.slot, value);
+            if (patch) onUpdateConfig(patch);
+          }}
+          label={edge.label}
+        />
+      ))}
+    </>
+  );
 }
 
 // ============================================================

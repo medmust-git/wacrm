@@ -700,6 +700,9 @@ const ADD_NODE_TYPES: NodeType[] = [
   'collect_input',
   'condition',
   'set_tag',
+  'http_fetch',
+  'send_dynamic_choices',
+  'send_products',
   'handoff',
   'end',
 ];

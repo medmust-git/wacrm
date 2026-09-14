@@ -37,8 +37,24 @@ import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
   engineSendMedia,
+  engineSendProducts,
   engineSendText,
 } from "./meta-send";
+import {
+  executeHttpFetch,
+  interpolateTemplate,
+  matchDynamicReply,
+  offerVarKey,
+  planDynamicChoices,
+  readPath,
+  resolveRetailerIds,
+  type HttpFetchNodeConfig,
+  type InterpolationContext,
+  type SendDynamicChoicesNodeConfig,
+  type SendProductsNodeConfig,
+} from "./integrations";
+import { isDeliverableUrl } from "@/lib/webhooks/ssrf";
+import { matchesWholeWord } from "@/lib/automations/engine";
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import { addContactTagAndDispatch } from "@/lib/contacts/tag-events";
 import { removeContactTag } from "@/lib/contacts/tag-write";
@@ -100,6 +116,9 @@ export function matchesKeywordTrigger(
 ): boolean {
   if (!text || !cfg.keywords?.length) return false;
   const matchType = cfg.match_type ?? "contains";
+  if (matchType === "word") {
+    return cfg.keywords.some((raw) => Boolean(raw) && matchesWholeWord(text, raw, cfg.case_sensitive));
+  }
   const haystack = cfg.case_sensitive ? text : text.toLowerCase();
   for (const raw of cfg.keywords) {
     if (!raw) continue;
@@ -128,6 +147,8 @@ export function matchesKeywordTrigger(
  */
 export function entryTriggerTexts(message: ParsedInbound): string[] {
   if (message.kind === "text") return [message.text];
+  // A cart carries no words to match; it starts `order_message` flows only.
+  if (message.kind === "order") return [];
   return [...new Set([message.reply_title, message.reply_id])].filter(
     (v): v is string => Boolean(v && v.trim()),
   );
@@ -140,7 +161,9 @@ export function isAutoAdvancing(node_type: string): boolean {
     node_type === "send_message" ||
     node_type === "send_media" ||
     node_type === "condition" ||
-    node_type === "set_tag"
+    node_type === "set_tag" ||
+    node_type === "http_fetch" ||
+    node_type === "send_products"
   );
 }
 
@@ -149,6 +172,7 @@ export function isSuspending(node_type: string): boolean {
   return (
     node_type === "send_buttons" ||
     node_type === "send_list" ||
+    node_type === "send_dynamic_choices" ||
     node_type === "collect_input"
   );
 }
@@ -185,6 +209,14 @@ export function evaluateConditionPredicate(args: {
     case "contains":
       if (args.subjectValue === undefined) return false;
       return args.subjectValue.includes(args.configValue ?? "");
+    case "gt":
+    case "lt": {
+      if (args.subjectValue === undefined || args.subjectValue === "") return false;
+      const left = Number(args.subjectValue);
+      const right = Number(args.configValue);
+      if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+      return args.operator === "gt" ? left > right : left < right;
+    }
   }
 }
 
@@ -361,6 +393,12 @@ async function findEntryFlow(
 
   const typed = flows as FlowRow[];
   for (const flow of typed) {
+    if (message.kind === "order") {
+      // A cart starts an `order_message` flow and nothing else - a keyword
+      // flow has no words to match against it.
+      if (flow.trigger_type === "order_message") return flow;
+      continue;
+    }
     if (flow.trigger_type === "keyword") {
       const cfg = flow.trigger_config as KeywordTriggerConfig;
       if (candidates.some((text) => matchesKeywordTrigger(text, cfg))) {
@@ -380,6 +418,71 @@ async function findEntryFlow(
   return null;
 }
 
+/** Whether a flow is an interrupt: a keyword flow allowed to end another run. */
+export function isInterruptFlow(flow: Pick<FlowRow, "trigger_type" | "trigger_config">): boolean {
+  return flow.trigger_type === "keyword" && (flow.trigger_config as KeywordTriggerConfig)?.interrupt === true;
+}
+
+/**
+ * The interrupt flow a message asks for, if any - "menu", "agent", "stop".
+ * Only flows marked `interrupt: true` are considered, so an ordinary keyword
+ * typed mid-flow (a customer answering "order" to a question) is still the
+ * answer to that question rather than a restart.
+ */
+async function findInterruptFlow(
+  db: AdminClient,
+  accountId: string,
+  message: ParsedInbound,
+): Promise<FlowRow | null> {
+  const candidates = entryTriggerTexts(message);
+  if (!candidates.length) return null;
+  const { data } = await db
+    .from("flows")
+    .select("*")
+    .eq("account_id", accountId)
+    .eq("status", "active")
+    .eq("trigger_type", "keyword")
+    .order("created_at", { ascending: true });
+  for (const flow of (data ?? []) as FlowRow[]) {
+    if (!isInterruptFlow(flow)) continue;
+    if (candidates.some((text) => matchesKeywordTrigger(text, flow.trigger_config as KeywordTriggerConfig))) {
+      return flow;
+    }
+  }
+  return null;
+}
+
+/** How long after a human agent's message the bot stays out of the way. */
+export const HUMAN_ACTIVE_WINDOW_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Whether a person is handling this conversation, so a new bot run must not
+ * start on the customer's next message.
+ *
+ * Without this, a handoff was undone by the customer's very next word: the
+ * run had ended, so "hi" or "order" matched a keyword flow and the menu
+ * appeared in the middle of a conversation with staff. A conversation still
+ * `pending` after a handoff, or one where an agent wrote in the last twelve
+ * hours, belongs to the human. Interrupt flows ("menu") still start, because
+ * the customer is asking for the bot by name.
+ */
+async function humanIsHandling(db: AdminClient, conversationId: string): Promise<boolean> {
+  const { data: conversation } = await db
+    .from("conversations")
+    .select("status")
+    .eq("id", conversationId)
+    .maybeSingle();
+  if ((conversation as { status?: string } | null)?.status === "pending") return true;
+  const since = new Date(Date.now() - HUMAN_ACTIVE_WINDOW_MS).toISOString();
+  const { count } = await db
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("conversation_id", conversationId)
+    .eq("sender_type", "agent")
+    .gte("created_at", since);
+  return (count ?? 0) > 0;
+}
+
 // ============================================================
 // Node executors — each handles ONE node type. send_buttons and
 // send_list also persist `last_prompt_message_id` so the inbox
@@ -397,8 +500,8 @@ async function sendButtonsAndSuspend(
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: cfg.text,
-    headerText: cfg.header_text,
+    bodyText: await fill(db, run, cfg.text),
+    headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
     footerText: cfg.footer_text,
     buttons: cfg.buttons.map((b) => ({ id: b.reply_id, title: b.title })),
   });
@@ -433,9 +536,9 @@ async function sendListAndSuspend(
     userId: run.user_id,
     conversationId: run.conversation_id!,
     contactId: run.contact_id!,
-    bodyText: cfg.text,
+    bodyText: await fill(db, run, cfg.text),
     buttonLabel: cfg.button_label,
-    headerText: cfg.header_text,
+    headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
     footerText: cfg.footer_text,
     sections: cfg.sections.map((s) => ({
       title: s.title,
@@ -462,6 +565,55 @@ async function sendListAndSuspend(
     })
     .eq("id", run.id);
   return { outcome: "advanced", node_key: node.node_key };
+}
+
+/**
+ * Sends a `send_dynamic_choices` node's options, built from run vars, and
+ * suspends. Returns `empty` without sending when there is nothing to offer.
+ *
+ * The offered item ids are saved to vars BEFORE the send, so a tap that
+ * arrives while this call is still finishing can already be matched.
+ */
+async function sendDynamicChoicesAndSuspend(
+  db: AdminClient,
+  run: FlowRunRow,
+  node: FlowNodeRow,
+): Promise<"sent" | "empty"> {
+  const cfg = node.config as unknown as SendDynamicChoicesNodeConfig;
+  const plan = planDynamicChoices(cfg, run.vars);
+  if (plan.kind === "empty") return "empty";
+  await saveVars(db, run, { [offerVarKey(node.node_key)]: plan.offered });
+
+  const bodyText = await fill(db, run, cfg.text);
+  const headerText = cfg.header_text ? await fill(db, run, cfg.header_text) : undefined;
+  const common = {
+    accountId: run.account_id,
+    userId: run.user_id,
+    conversationId: run.conversation_id!,
+    contactId: run.contact_id!,
+    bodyText,
+    headerText,
+    footerText: cfg.footer_text,
+  };
+  const { whatsapp_message_id } =
+    plan.kind === "buttons"
+      ? await engineSendInteractiveButtons({ ...common, buttons: plan.options.map((o) => ({ id: o.id, title: o.title })) })
+      : await engineSendInteractiveList({
+          ...common,
+          buttonLabel: (cfg.button_label || "Choose").slice(0, 20),
+          sections: [{ rows: plan.options }],
+        });
+  await logEvent(db, run.id, "message_sent", node.node_key, {
+    node_type: "send_dynamic_choices",
+    options: plan.options.length,
+    whatsapp_message_id,
+  });
+  const { data: msg } = await db.from("messages").select("id").eq("message_id", whatsapp_message_id).maybeSingle();
+  await db
+    .from("flow_runs")
+    .update({ last_prompt_message_id: (msg as { id: string } | null)?.id ?? null })
+    .eq("id", run.id);
+  return "sent";
 }
 
 async function executeHandoff(
@@ -507,8 +659,10 @@ async function evaluateConditionNode(
 ): Promise<boolean> {
   let subjectValue: string | undefined;
   if (cfg.subject === "var") {
-    const v = run.vars[cfg.subject_key];
-    subjectValue = typeof v === "string" ? v : v === undefined ? undefined : String(v);
+    // Dotted paths reach into an http_fetch response (`orders.result`).
+    const v = readPath(run.vars, cfg.subject_key);
+    subjectValue =
+      typeof v === "string" ? v : v === undefined || v === null ? undefined : typeof v === "object" ? JSON.stringify(v) : String(v);
   } else if (cfg.subject === "tag") {
     const { count } = await db
       .from("contact_tags")
@@ -542,17 +696,46 @@ async function evaluateConditionNode(
 }
 
 /**
- * Tiny `{{vars.foo}}` interpolation. Used by send_message + collect_input
- * prompt text so a captured `name` can show up in the next prompt
- * ("Thanks {{vars.name}}, what's your email?"). Missing vars render as
- * empty string — the same behavior as the automations engine.
+ * The contact a run is talking to, for `{{contact.*}}` placeholders and the
+ * default `http_fetch` body. Read once per run object and cached: one inbound
+ * message can walk several nodes that all need it.
  */
-function interpolateVars(template: string, vars: Record<string, unknown>): string {
-  if (!template) return "";
-  return template.replace(/\{\{vars\.([a-zA-Z0-9_]+)\}\}/g, (_, key) => {
-    const v = vars[key];
-    return v === undefined || v === null ? "" : String(v);
-  });
+const contactCache = new WeakMap<FlowRunRow, Promise<{ phone: string | null; name: string | null }>>();
+
+function contactFor(db: AdminClient, run: FlowRunRow) {
+  let cached = contactCache.get(run);
+  if (!cached) {
+    cached = (async () => {
+      if (!run.contact_id) return { phone: null, name: null };
+      const { data } = await db.from("contacts").select("phone, name").eq("id", run.contact_id).maybeSingle();
+      const row = data as { phone?: string | null; name?: string | null } | null;
+      return { phone: row?.phone ?? null, name: row?.name ?? null };
+    })();
+    contactCache.set(run, cached);
+  }
+  return cached;
+}
+
+async function contextFor(db: AdminClient, run: FlowRunRow): Promise<InterpolationContext> {
+  return { vars: run.vars, contact: await contactFor(db, run) };
+}
+
+/**
+ * Placeholder filling for every customer-facing string a node sends:
+ * `{{vars.a.b}}`, `{{contact.name}}`, `{{contact.phone}}`. The earlier flat
+ * `{{vars.foo}}` form is a subset and behaves as before; missing values render
+ * as the empty string.
+ */
+async function fill(db: AdminClient, run: FlowRunRow, template: string | undefined): Promise<string> {
+  return interpolateTemplate(template, await contextFor(db, run));
+}
+
+/** Merges into `vars` in the DB and mirrors it on the in-memory run. */
+async function saveVars(db: AdminClient, run: FlowRunRow, patch: Record<string, unknown>): Promise<void> {
+  const next = { ...run.vars, ...patch };
+  const { error } = await db.from("flow_runs").update({ vars: next }).eq("id", run.id);
+  if (error) throw new Error(`saving run vars failed: ${error.message}`);
+  run.vars = next;
 }
 
 async function endRun(
@@ -619,7 +802,7 @@ async function advanceFromNodeKey(
     userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
-          text: interpolateVars(cfg.text, run.vars),
+          text: await fill(db, run, cfg.text),
         });
         await logEvent(db, run.id, "message_sent", node.node_key, {
           node_type: "send_message",
@@ -645,11 +828,9 @@ async function advanceFromNodeKey(
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
           kind: cfg.media_type,
-          link: cfg.media_url,
-          caption: cfg.caption
-            ? interpolateVars(cfg.caption, run.vars)
-            : undefined,
-          filename: cfg.filename,
+          link: await fill(db, run, cfg.media_url),
+          caption: cfg.caption ? await fill(db, run, cfg.caption) : undefined,
+          filename: cfg.filename ? await fill(db, run, cfg.filename) : undefined,
         });
         await logEvent(db, run.id, "message_sent", node.node_key, {
           node_type: "send_media",
@@ -677,7 +858,7 @@ async function advanceFromNodeKey(
     userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
-          text: interpolateVars(cfg.prompt_text, run.vars),
+          text: await fill(db, run, cfg.prompt_text),
         });
         await logEvent(db, run.id, "message_sent", node.node_key, {
           node_type: "collect_input",
@@ -769,6 +950,105 @@ async function advanceFromNodeKey(
       }
       currentKey = cfg.next_node_key;
       continue;
+    }
+    if (node.node_type === "http_fetch") {
+      const cfg = node.config as unknown as HttpFetchNodeConfig;
+      const outcome = await executeHttpFetch(cfg, await contextFor(db, run), {
+        fetch,
+        isDeliverableUrl,
+        env: process.env,
+      });
+      if (outcome.ok) {
+        try {
+          await saveVars(db, run, { [cfg.save_as]: outcome.data });
+        } catch (err) {
+          await logEvent(db, run.id, "error", node.node_key, {
+            reason: "http_fetch_save_failed",
+            detail: err instanceof Error ? err.message : String(err),
+          });
+          currentKey = cfg.error_next;
+          continue;
+        }
+      }
+      // The response body is deliberately not logged: it is an order or a
+      // customer record, and flow_run_events are readable to every agent.
+      await logEvent(db, run.id, "node_entered", node.node_key, {
+        http_fetch: outcome.ok ? "success" : "error",
+        status: outcome.ok ? outcome.status : outcome.status ?? null,
+        reason: outcome.ok ? null : outcome.reason,
+      });
+      currentKey = outcome.ok ? cfg.success_next : cfg.error_next;
+      continue;
+    }
+    if (node.node_type === "send_products") {
+      const cfg = node.config as unknown as SendProductsNodeConfig;
+      const retailerIds = resolveRetailerIds(cfg, run.vars);
+      const emptyNext = cfg.empty_next || cfg.next_node_key;
+      if (cfg.mode !== "catalog" && retailerIds.length === 0) {
+        currentKey = emptyNext;
+        continue;
+      }
+      try {
+        const sent = await engineSendProducts({
+          accountId: run.account_id,
+          userId: run.user_id,
+          conversationId: run.conversation_id!,
+          contactId: run.contact_id!,
+          mode: cfg.mode,
+          bodyText: await fill(db, run, cfg.body_text),
+          headerText: cfg.header_text ? await fill(db, run, cfg.header_text) : undefined,
+          footerText: cfg.footer_text,
+          retailerIds: cfg.mode === "product" ? retailerIds.slice(0, 1) : retailerIds,
+          sectionTitle: cfg.section_title,
+        });
+        if ("skipped" in sent) {
+          await logEvent(db, run.id, "node_entered", node.node_key, { skipped: sent.skipped });
+          currentKey = emptyNext;
+          continue;
+        }
+        await logEvent(db, run.id, "message_sent", node.node_key, {
+          node_type: "send_products",
+          mode: cfg.mode,
+          products: retailerIds.length,
+          whatsapp_message_id: sent.whatsapp_message_id,
+        });
+      } catch (err) {
+        // A product message fails for reasons a customer cannot fix (an id
+        // Meta has not synced yet, a catalogue in review). Take the empty
+        // edge - usually a text list with links - rather than ending the
+        // conversation.
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "send_products_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        currentKey = emptyNext;
+        continue;
+      }
+      currentKey = cfg.next_node_key;
+      continue;
+    }
+    if (node.node_type === "send_dynamic_choices") {
+      const cfg = node.config as unknown as SendDynamicChoicesNodeConfig;
+      let result: "sent" | "empty";
+      try {
+        result = await sendDynamicChoicesAndSuspend(db, run, node);
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "send_dynamic_choices_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "send_dynamic_choices_failed");
+        return { outcome: "completed" };
+      }
+      if (result === "empty") {
+        currentKey = cfg.empty_next;
+        continue;
+      }
+      const advanced = await advanceCurrentNodeKey(db, run.id, run.current_node_key, node.node_key);
+      if (!advanced) {
+        await logEvent(db, run.id, "error", node.node_key, { reason: "lost_race_during_advance" });
+      }
+      return { outcome: "advanced" };
     }
     if (node.node_type === "send_buttons") {
       await sendButtonsAndSuspend(db, run, node);
@@ -892,6 +1172,22 @@ export async function dispatchInboundToFlows(
           outcome: "duplicate_inbound_ignored",
         };
       }
+      // An interrupt ("menu", "agent", "stop") ends whatever is running and
+      // starts the flow asked for. A cart does the same for the order flow:
+      // the customer has moved on from whatever question was pending.
+      const replacement =
+        input.message.kind === "order"
+          ? await findEntryFlow(db, input.accountId, input.message, false)
+          : await findInterruptFlow(db, input.accountId, input.message);
+      if (replacement?.entry_node_id) {
+        await logEvent(db, activeRun.id, "completed", activeRun.current_node_key, {
+          reason: "interrupted",
+          by_flow_id: replacement.id,
+        });
+        await endRun(db, activeRun.id, "completed", "interrupted");
+        const nodes = await loadAllNodes(db, replacement.id);
+        return startNewRun(db, replacement, input, nodes);
+      }
       // One SELECT for the whole flow's nodes — advance loop is now
       // in-memory. See loadAllNodes.
       const nodes = await loadAllNodes(db, activeRun.flow_id);
@@ -906,6 +1202,13 @@ export async function dispatchInboundToFlows(
       input.isFirstInboundMessage,
     );
     if (!flow || !flow.entry_node_id) {
+      return { consumed: false, outcome: "no_match" };
+    }
+    if (
+      !isInterruptFlow(flow) &&
+      input.message.kind !== "order" &&
+      (await humanIsHandling(db, input.conversationId))
+    ) {
       return { consumed: false, outcome: "no_match" };
     }
     const nodes = await loadAllNodes(db, flow.id);
@@ -937,6 +1240,7 @@ async function handleReplyForActiveRun(
     reply_kind: message.kind,
     reply_id: message.kind === "interactive_reply" ? message.reply_id : null,
     text_length: message.kind === "text" ? message.text.length : null,
+    order_items: message.kind === "order" ? message.items.length : null,
   });
 
   if (!run.current_node_key) {
@@ -968,6 +1272,18 @@ async function handleReplyForActiveRun(
       currentNode.node_type === "send_list")
   ) {
     matched = matchReplyId(currentNode, message.reply_id);
+  } else if (
+    message.kind === "interactive_reply" &&
+    currentNode.node_type === "send_dynamic_choices"
+  ) {
+    const hit = matchDynamicReply(currentNode, run.vars, message.reply_id);
+    if (hit?.kind === "item") {
+      const cfg = currentNode.config as unknown as SendDynamicChoicesNodeConfig;
+      await saveVars(db, run, { [cfg.save_selection_as]: hit.selection });
+      matched = hit.next;
+    } else if (hit?.kind === "extra") {
+      matched = hit.next;
+    }
   } else if (
     message.kind === "text" &&
     currentNode.node_type === "collect_input"
@@ -1047,6 +1363,15 @@ async function handleReplyForActiveRun(
       await sendButtonsAndSuspend(db, run, currentNode);
     } else if (currentNode.node_type === "send_list") {
       await sendListAndSuspend(db, run, currentNode);
+    } else if (currentNode.node_type === "send_dynamic_choices") {
+      try {
+        await sendDynamicChoicesAndSuspend(db, run, currentNode);
+      } catch (err) {
+        await logEvent(db, run.id, "error", currentNode.node_key, {
+          reason: "reprompt_send_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
     } else if (currentNode.node_type === "collect_input") {
       // Customer typed something we couldn't accept (empty after trim,
       // or var_key missing — rare). Re-send the prompt so they try again.
@@ -1057,7 +1382,7 @@ async function handleReplyForActiveRun(
     userId: run.user_id,
           conversationId: run.conversation_id!,
           contactId: run.contact_id!,
-          text: interpolateVars(cfg.prompt_text, run.vars),
+          text: await fill(db, run, cfg.prompt_text),
         });
       } catch (err) {
         await logEvent(db, run.id, "error", currentNode.node_key, {
@@ -1111,6 +1436,12 @@ async function startNewRun(
       conversation_id: input.conversationId,
       status: "active",
       current_node_key: flow.entry_node_id,
+      // A cart's items are the order flow's input, e.g. an http_fetch body of
+      // `{"items": {{json:vars.cart}}}`.
+      vars:
+        input.message.kind === "order"
+          ? { cart: input.message.items, catalog_id: input.message.catalog_id }
+          : {},
     })
     .select("*")
     .maybeSingle();

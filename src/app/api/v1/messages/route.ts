@@ -23,7 +23,9 @@
 //       "params": ["A123"] | { "body": [...] }   // array = positional body; object = structured
 //     },
 //     "reply_to_message_id": "<uuid>",       // optional, must be in the same conversation
-//     "name": "Jane Doe"                     // optional, names a newly-created contact
+//     "name": "Jane Doe",                    // optional, names a newly-created contact
+//     "preserve_flow_runs": true             // optional: an automated notification - stored as a
+//                                            // bot message and does not end the contact's flow run
 //   }
 //
 // Response (201):
@@ -124,6 +126,7 @@ export async function POST(request: Request) {
           typeof body.reply_to_message_id === 'string'
             ? body.reply_to_message_id
             : null,
+        automated: body.preserve_flow_runs === true,
       }
     );
 

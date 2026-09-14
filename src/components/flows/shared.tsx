@@ -19,6 +19,9 @@
 import {
   Flag,
   GitFork,
+  Globe,
+  LayoutList,
+  ShoppingBag,
   Inbox,
   ListChecks,
   ListPlus,
@@ -50,6 +53,9 @@ export type NodeType =
   | 'condition'
   | 'set_tag'
   | 'handoff'
+  | 'http_fetch'
+  | 'send_dynamic_choices'
+  | 'send_products'
   | 'end';
 
 export interface BuilderNode {
@@ -152,6 +158,27 @@ export const NODE_META: Record<
     blurb: 'Adds or removes a contact tag',
     category: 'logic',
   },
+  http_fetch: {
+    label: 'Call API',
+    icon: Globe,
+    color: 'text-lime-400',
+    blurb: 'Calls an external API and saves the reply',
+    category: 'logic',
+  },
+  send_dynamic_choices: {
+    label: 'Send choices from data',
+    icon: LayoutList,
+    color: 'text-violet-400',
+    blurb: 'Buttons or a list built from saved data',
+    category: 'messaging',
+  },
+  send_products: {
+    label: 'Send products',
+    icon: ShoppingBag,
+    color: 'text-orange-400',
+    blurb: 'Shows catalogue products with images',
+    category: 'messaging',
+  },
   handoff: {
     label: 'Handoff to agent',
     icon: UserPlus,
@@ -206,6 +233,9 @@ const NODE_HUE: Record<NodeType, { l: number; c: number; h: number }> = {
   condition: { l: 0.72, c: 0.15, h: 65 }, // amber — a fork in the road
   set_tag: { l: 0.65, c: 0.15, h: 350 }, // pink
   handoff: { l: 0.65, c: 0.17, h: 16 }, // rose — hands off
+  http_fetch: { l: 0.7, c: 0.14, h: 130 }, // lime — reaches outside
+  send_dynamic_choices: { l: 0.62, c: 0.16, h: 305 }, // violet — data-driven choices
+  send_products: { l: 0.7, c: 0.15, h: 45 }, // orange — the shop
   end: { l: 0.55, c: 0.01, h: 260 }, // neutral grey — terminal
 };
 
@@ -423,6 +453,22 @@ export function summarizeNode(
     case 'handoff': {
       const note = typeof cfg.note === 'string' ? cfg.note : '';
       return note.length > 0 ? truncate(note) : null;
+    }
+    case 'http_fetch': {
+      const method = typeof cfg.method === 'string' ? cfg.method : 'GET';
+      const url = typeof cfg.url === 'string' ? cfg.url : '';
+      const saveAs = typeof cfg.save_as === 'string' ? cfg.save_as : '';
+      return url ? `${method} ${truncate(url, 50)}${saveAs ? ` → vars.${saveAs}` : ''}` : null;
+    }
+    case 'send_dynamic_choices': {
+      const text = typeof cfg.text === 'string' ? cfg.text : '';
+      const source = typeof cfg.source === 'string' ? cfg.source : '';
+      return text || source ? `${truncate(text, 40)}${source ? ` · from vars.${source}` : ''}` : null;
+    }
+    case 'send_products': {
+      const mode = typeof cfg.mode === 'string' ? cfg.mode : 'catalog';
+      const text = typeof cfg.body_text === 'string' ? cfg.body_text : '';
+      return `${mode}${text ? ` · ${truncate(text, 50)}` : ''}`;
     }
   }
 }

@@ -19,6 +19,10 @@ const h = vi.hoisted(() => ({
     /** Set by the flow_runs INSERT; what its .maybeSingle() returns. */
     insertedRun: null as Record<string, unknown> | null,
     rpcCalls: [] as string[],
+    /** Rows the conversations lookup sees (the human-handling guard). */
+    conversations: [] as unknown[],
+    /** What a count of recent agent messages returns. */
+    agentMessageCount: 0,
   },
 }));
 
@@ -27,6 +31,7 @@ vi.mock("./admin-client", () => {
     if (table === "flow_runs") return h.state.activeRuns;
     if (table === "flows") return h.state.flows;
     if (table === "flow_nodes") return h.state.nodes;
+    if (table === "conversations") return h.state.conversations;
     return [];
   }
 
@@ -36,6 +41,8 @@ vi.mock("./admin-client", () => {
       eq: () => b,
       in: () => b,
       filter: () => b,
+      // The human-handling guard counts recent agent messages.
+      gte: () => b,
       order: () => b,
       limit: () => b,
       update: () => b,
@@ -65,7 +72,12 @@ vi.mock("./admin-client", () => {
           error: null;
           count: number;
         }) => unknown,
-      ) => resolve({ data: rows(table), error: null, count: 0 }),
+      ) =>
+        resolve({
+          data: rows(table),
+          error: null,
+          count: table === "messages" ? h.state.agentMessageCount : 0,
+        }),
     };
     return b;
   }
@@ -157,6 +169,8 @@ beforeEach(() => {
   h.state.inserted = [];
   h.state.insertedRun = null;
   h.state.rpcCalls = [];
+  h.state.conversations = [];
+  h.state.agentMessageCount = 0;
   engineSendText.mockClear();
 });
 
@@ -315,5 +329,90 @@ describe("dispatchInboundToFlows — entry triggers (#490)", () => {
     expect(result.consumed).toBe(true);
     expect(result.flow_run_id).toBe("run-1");
     expect(startedRuns()).toHaveLength(1);
+  });
+});
+
+describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
+  const MENU_FLOW = {
+    ...KEYWORD_FLOW,
+    id: "flow-menu",
+    trigger_config: { keywords: ["menu"], match_type: "word", interrupt: true },
+  };
+
+  it("does not start a bot run while a handed-off conversation waits for a person", async () => {
+    h.state.flows = [KEYWORD_FLOW];
+    h.state.conversations = [{ status: "pending" }];
+
+    const result = await dispatch({ kind: "text", text: "order status?", meta_message_id: "m1" });
+
+    // The customer's next word after a handoff used to restart the menu in
+    // the middle of their conversation with staff.
+    expect(result.consumed).toBe(false);
+    expect(startedRuns()).toEqual([]);
+  });
+
+  it("does not start a bot run for a few hours after an agent has written", async () => {
+    h.state.flows = [KEYWORD_FLOW];
+    h.state.conversations = [{ status: "open" }];
+    h.state.agentMessageCount = 1;
+
+    expect((await dispatch({ kind: "text", text: "order status", meta_message_id: "m1" })).consumed).toBe(false);
+  });
+
+  it("still starts an interrupt flow the customer asks for by name", async () => {
+    h.state.flows = [MENU_FLOW];
+    h.state.conversations = [{ status: "pending" }];
+
+    const result = await dispatch({ kind: "text", text: "menu", meta_message_id: "m1" });
+
+    expect(result.consumed).toBe(true);
+    expect(startedRuns()[0]?.row.flow_id).toBe("flow-menu");
+  });
+
+  it("matches an interrupt keyword as a whole word only", async () => {
+    h.state.flows = [MENU_FLOW];
+    expect((await dispatch({ kind: "text", text: "menuscript", meta_message_id: "m1" })).consumed).toBe(false);
+  });
+
+  it("ends the active run and starts the interrupt flow mid-conversation", async () => {
+    h.state.activeRuns = [
+      {
+        id: "old-run",
+        flow_id: "flow-track",
+        account_id: "acct-1",
+        user_id: "u-1",
+        contact_id: "ct-1",
+        conversation_id: "cv-1",
+        status: "active",
+        current_node_key: "ask_order_number",
+        vars: {},
+        reprompt_count: 0,
+      },
+    ];
+    h.state.flows = [MENU_FLOW];
+
+    const result = await dispatch({ kind: "text", text: "Menu", meta_message_id: "m2" });
+
+    expect(result.consumed).toBe(true);
+    expect(startedRuns()).toHaveLength(1);
+    expect(startedRuns()[0].row.flow_id).toBe("flow-menu");
+  });
+
+  it("starts the order flow for a catalogue cart, with the cart in vars", async () => {
+    h.state.flows = [KEYWORD_FLOW, { ...KEYWORD_FLOW, id: "flow-cart", trigger_type: "order_message", trigger_config: {} }];
+    const items = [{ product_retailer_id: "decipher-i", quantity: 2, item_price: 239, currency: "INR" }];
+
+    const result = await dispatch({ kind: "order", catalog_id: "cat-1", items, meta_message_id: "m3" });
+
+    expect(result.consumed).toBe(true);
+    expect(startedRuns()).toHaveLength(1);
+    expect(startedRuns()[0].row.flow_id).toBe("flow-cart");
+    expect(startedRuns()[0].row.vars).toEqual({ cart: items, catalog_id: "cat-1" });
+  });
+
+  it("never starts a keyword flow from a cart", async () => {
+    h.state.flows = [{ ...KEYWORD_FLOW, trigger_config: { keywords: ["order"] } }];
+    const result = await dispatch({ kind: "order", catalog_id: null, items: [], meta_message_id: "m4" });
+    expect(result.consumed).toBe(false);
   });
 });

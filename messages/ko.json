@@ -1078,6 +1078,7 @@
       "triggerKeywordTitle": "메시지에 키워드가 포함될 때",
       "triggerFirstInboundTitle": "고객의 첫 수신 메시지",
       "triggerManualTitle": "수동 전용 (자동 트리거 없음)",
+      "triggerOrderMessageTitle": "고객이 카탈로그 장바구니를 보냄",
       "keywordsLabel": "키워드 (쉼표로 구분)",
       "keywordsPlaceholder": "support, help, hi",
       "entryNodeTitle": "시작 노드:",
@@ -1155,7 +1156,10 @@
         "filenamePlaceholder": "invoice.pdf",
         "advanceAfterSending": "전송 후 다음 진행",
         "pickNextNode": "다음 노드를 선택하세요…",
-        "none": "— 없음 —"
+        "none": "— 없음 —",
+        "integrationConfigLabel": "구성 (JSON)",
+        "integrationConfigHelp": "노드 설정을 JSON으로 편집합니다. JSON이 유효할 때 적용됩니다.",
+        "integrationConfigInvalid": "유효한 JSON이 아닙니다 - 마지막 유효한 구성이 유지됩니다."
       },
       "categories": {
         "messaging": "메시징",
@@ -1202,6 +1206,18 @@
         "end": {
           "label": "종료",
           "blurb": "플로우를 종료합니다"
+        },
+        "http_fetch": {
+          "label": "API 호출",
+          "blurb": "외부 API를 호출하고 응답을 저장합니다"
+        },
+        "send_dynamic_choices": {
+          "label": "데이터 기반 선택지 보내기",
+          "blurb": "저장된 데이터로 버튼 또는 목록을 만듭니다"
+        },
+        "send_products": {
+          "label": "상품 보내기",
+          "blurb": "카탈로그 상품을 이미지와 함께 보여줍니다"
         }
       }
     },

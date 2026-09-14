@@ -24,6 +24,7 @@
  */
 
 import { INTERACTIVE_LIMITS } from "@/lib/whatsapp/meta-api";
+import { HTTP_FETCH_MAX_TIMEOUT_MS, PRODUCT_LIST_MAX, integrationEdges } from "./integrations";
 
 export interface ValidationIssue {
   severity: "error" | "warning";
@@ -37,7 +38,7 @@ export interface ValidationIssue {
 
 interface FlowInput {
   name: string;
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "manual" | "order_message";
   trigger_config: Record<string, unknown>;
   entry_node_id: string | null;
 }
@@ -588,7 +589,7 @@ function validateNode(
       const cfg = node.config as {
         subject?: "var" | "tag" | "contact_field";
         subject_key?: string;
-        operator?: "equals" | "contains" | "present" | "absent";
+        operator?: "equals" | "contains" | "present" | "absent" | "gt" | "lt";
         value?: string;
         true_next?: string;
         false_next?: string;
@@ -613,7 +614,7 @@ function validateNode(
       }
       if (
         !cfg.operator ||
-        !["equals", "contains", "present", "absent"].includes(cfg.operator)
+        !["equals", "contains", "present", "absent", "gt", "lt"].includes(cfg.operator)
       ) {
         issues.push({
           severity: "error",
@@ -623,7 +624,7 @@ function validateNode(
           message: "Condition needs an operator.",
         });
       } else if (
-        (cfg.operator === "equals" || cfg.operator === "contains") &&
+        (cfg.operator === "equals" || cfg.operator === "contains" || cfg.operator === "gt" || cfg.operator === "lt") &&
         (cfg.value === undefined || cfg.value === "")
       ) {
         issues.push({
@@ -700,6 +701,12 @@ function validateNode(
       }
       break;
     }
+
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      issues.push(...validateIntegrationNode(node, knownKeys));
+      break;
 
     case "handoff":
     case "end":
@@ -785,9 +792,88 @@ function outgoingEdges(node: NodeInput): string[] {
       }
       return out;
     }
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      return (integrationEdges(node) ?? []).map((edge) => edge.target).filter((k): k is string => !!k);
     case "handoff":
     case "end":
     default:
       return [];
   }
+}
+
+// ============================================================
+// Integration nodes
+// ============================================================
+
+const VAR_KEY = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const VAR_PATH = /^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)*$/;
+
+function validateIntegrationNode(node: NodeInput, knownKeys: Set<string>): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const cfg = node.config;
+  const error = (field: string, message: string) =>
+    issues.push({ severity: "error", scope: "node", node_key: node.node_key, field, message });
+  const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+
+  if (node.node_type === "http_fetch") {
+    if (cfg.method !== "GET" && cfg.method !== "POST") error("method", "Call API needs a method (GET or POST).");
+    const url = text(cfg.url);
+    if (!/^https:\/\//i.test(url)) error("url", "Call API needs an https:// URL.");
+    if (!VAR_KEY.test(text(cfg.save_as))) error("save_as", "Call API needs a variable name to save the response under.");
+    if (cfg.timeout_ms !== undefined && (typeof cfg.timeout_ms !== "number" || cfg.timeout_ms > HTTP_FETCH_MAX_TIMEOUT_MS)) {
+      error("timeout_ms", `Timeout must be a number of milliseconds up to ${HTTP_FETCH_MAX_TIMEOUT_MS}.`);
+    }
+    const headers = cfg.headers && typeof cfg.headers === "object" ? (cfg.headers as Record<string, unknown>) : {};
+    for (const [name, value] of Object.entries(headers)) {
+      if (typeof value !== "string") error(`headers.${name}`, `Header "${name}" must be text.`);
+      else if (/\{\{\s*env\./.test(value) && !/^\{\{\s*env\.FLOW_SECRET_[A-Z0-9_]+\s*\}\}$/.test(value.trim())) {
+        error(`headers.${name}`, `Header "${name}" may only read an environment variable named FLOW_SECRET_*, as the whole value.`);
+      }
+    }
+    if (cfg.body !== undefined && cfg.method === "GET") {
+      issues.push({ severity: "warning", scope: "node", node_key: node.node_key, field: "body", message: "A GET request sends no body; it will be ignored." });
+    }
+  }
+
+  if (node.node_type === "send_dynamic_choices") {
+    if (!text(cfg.text)) error("text", "Choices need a message body.");
+    if (!VAR_PATH.test(text(cfg.source))) error("source", "Choices need a source path under vars, e.g. orders.choices.");
+    if (!text(cfg.id_field)) error("id_field", "Choices need the item field to use as the id.");
+    if (!text(cfg.title_field)) error("title_field", "Choices need the item field to use as the title.");
+    if (!VAR_KEY.test(text(cfg.save_selection_as))) error("save_selection_as", "Choices need a variable name to save the tapped item under.");
+    const extras = Array.isArray(cfg.extra_rows) ? (cfg.extra_rows as Array<Record<string, unknown>>) : [];
+    if (extras.length > INTERACTIVE_LIMITS.maxListRowsTotal - 1) {
+      error("extra_rows", `At most ${INTERACTIVE_LIMITS.maxListRowsTotal - 1} extra rows, leaving room for at least one item.`);
+    }
+    const seen = new Set<string>();
+    extras.forEach((row, index) => {
+      const id = text(row.reply_id);
+      if (!id) error(`extra_rows.${index}.reply_id`, "Each extra row needs a reply id.");
+      else if (seen.has(id)) error(`extra_rows.${index}.reply_id`, `Duplicate extra row id "${id}".`);
+      seen.add(id);
+      if (!text(row.title)) error(`extra_rows.${index}.title`, "Each extra row needs a title.");
+    });
+  }
+
+  if (node.node_type === "send_products") {
+    if (!["catalog", "product", "product_list"].includes(String(cfg.mode))) error("mode", "Send products needs a mode: catalog, product or product_list.");
+    if (!text(cfg.body_text)) error("body_text", "Send products needs a message body.");
+    if (cfg.mode === "product_list" && !text(cfg.header_text)) error("header_text", "A product list needs a header text.");
+    if (cfg.mode !== "catalog") {
+      const ids = Array.isArray(cfg.retailer_ids) ? cfg.retailer_ids : [];
+      if (!text(cfg.retailer_ids_source) && ids.length === 0) error("retailer_ids", "Name products, or a source path that holds their retailer ids.");
+      if (ids.length > PRODUCT_LIST_MAX) error("retailer_ids", `At most ${PRODUCT_LIST_MAX} products.`);
+    }
+  }
+
+  for (const edge of integrationEdges(node) ?? []) {
+    if (!edge.target) {
+      error(edge.field, `Needs a node for the "${edge.label}" edge.`);
+    } else if (!knownKeys.has(edge.target)) {
+      error(edge.field, `The "${edge.label}" edge points to non-existent node "${edge.target}".`);
+    }
+  }
+  return issues;
 }

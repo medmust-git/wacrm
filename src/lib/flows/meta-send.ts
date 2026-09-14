@@ -2,6 +2,7 @@ import {
   sendInteractiveButtons,
   sendInteractiveList,
   sendMediaMessage,
+  sendProductMessage,
   sendTextMessage,
   type InteractiveButton,
   type InteractiveListSection,
@@ -457,5 +458,106 @@ async function sendInteractiveViaMeta(
     })
     .eq('id', input.conversationId)
 
+  return { whatsapp_message_id: waMessageId }
+}
+
+// ------------------------------------------------------------
+// Commerce messages (catalogue / product / product list)
+// ------------------------------------------------------------
+
+export interface SendProductsEngineArgs {
+  accountId: string
+  userId: string
+  conversationId: string
+  contactId: string
+  mode: 'catalog' | 'product' | 'product_list'
+  bodyText: string
+  headerText?: string
+  footerText?: string
+  retailerIds: string[]
+  sectionTitle?: string
+}
+
+/**
+ * Sends a catalogue, product or product-list message from the Flows engine.
+ *
+ * Returns `{ skipped: 'no_catalog' }` rather than throwing when the account has
+ * no catalogue connected, so the run can take its `empty_next` edge instead of
+ * failing - a store that has not finished Commerce Manager setup should get a
+ * bot that skips the product step, not one that dies on it.
+ *
+ * Persisted to `messages` as TEXT, not `interactive`: the inbox renderer knows
+ * button and list payloads only, and an unrecognised interactive payload would
+ * render as nothing. Staff see what was sent as a readable line instead.
+ */
+export async function engineSendProducts(
+  args: SendProductsEngineArgs,
+): Promise<{ whatsapp_message_id: string } | { skipped: 'no_catalog' }> {
+  const db = supabaseAdmin()
+  const { data: contact, error: contactErr } = await db
+    .from('contacts')
+    .select('id, phone')
+    .eq('id', args.contactId)
+    .eq('account_id', args.accountId)
+    .maybeSingle()
+  if (contactErr || !contact?.phone) throw new Error('contact not found for this account')
+  const sanitized = sanitizePhoneForMeta(contact.phone)
+  if (!isValidE164(sanitized)) throw new Error(`contact phone invalid: ${contact.phone}`)
+
+  const { data: config, error: configErr } = await db
+    .from('whatsapp_config')
+    .select('*')
+    .eq('account_id', args.accountId)
+    .single()
+  if (configErr || !config) throw new Error('WhatsApp not configured for this account')
+  const catalogId = (config as { catalog_id?: string | null }).catalog_id ?? null
+  if (!catalogId) return { skipped: 'no_catalog' }
+
+  const accessToken = decrypt(config.access_token)
+  let waMessageId = ''
+  let lastError: unknown = null
+  for (const phone of phoneVariants(sanitized)) {
+    try {
+      waMessageId = (
+        await sendProductMessage({
+          phoneNumberId: config.phone_number_id,
+          accessToken,
+          to: phone,
+          mode: args.mode,
+          catalogId,
+          bodyText: args.bodyText,
+          headerText: args.headerText,
+          footerText: args.footerText,
+          retailerIds: args.retailerIds,
+          sectionTitle: args.sectionTitle,
+        })
+      ).messageId
+      lastError = null
+      break
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!isRecipientNotAllowedError(msg)) throw err
+      lastError = err
+    }
+  }
+  if (lastError) throw lastError
+
+  const summary =
+    args.mode === 'catalog'
+      ? `[Catalogue] ${args.bodyText}`
+      : `[Products: ${args.retailerIds.join(', ')}] ${args.bodyText}`
+  const { error: msgErr } = await db.from('messages').insert({
+    conversation_id: args.conversationId,
+    sender_type: 'bot',
+    content_type: 'text',
+    content_text: summary,
+    message_id: waMessageId,
+    status: 'sent',
+  })
+  if (msgErr) throw new Error(`sent to Meta but DB insert failed: ${msgErr.message}`)
+  await db
+    .from('conversations')
+    .update({ last_message_text: summary, last_message_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('id', args.conversationId)
   return { whatsapp_message_id: waMessageId }
 }

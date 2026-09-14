@@ -1055,3 +1055,95 @@ export async function downloadMedia(
   const buffer = Buffer.from(await response.arrayBuffer())
   return { buffer, contentType }
 }
+
+// ============================================================
+// Commerce: catalogue, single-product and multi-product messages
+// ============================================================
+
+export interface SendProductMessageArgs {
+  phoneNumberId: string
+  accessToken: string
+  to: string
+  /** `catalog` shows the whole catalogue; `product` one card; `product_list` a section of up to 30. */
+  mode: 'catalog' | 'product' | 'product_list'
+  /** Required by Meta for `product` and `product_list`. */
+  catalogId?: string | null
+  bodyText: string
+  /** Required by Meta for `product_list` (text header only). */
+  headerText?: string
+  footerText?: string
+  retailerIds?: string[]
+  sectionTitle?: string
+}
+
+/**
+ * Sends an interactive commerce message. The product images, names and prices
+ * come from the Meta catalogue connected to the number - which is what makes
+ * these the way to show products WITH images in chat, and why the retailer ids
+ * must be exactly the catalogue item ids (the MedMust feed uses product slugs).
+ *
+ * Meta's limits are enforced here before the request: a `product_list` needs a
+ * header and 1-30 products, a `product` exactly one, and a catalogue message
+ * no products at all.
+ */
+export async function sendProductMessage(args: SendProductMessageArgs): Promise<MetaSendResult> {
+  const { phoneNumberId, accessToken, to, mode, catalogId, bodyText, headerText, footerText } = args
+  const retailerIds = args.retailerIds ?? []
+  validateInteractiveBody(bodyText)
+  validateInteractiveHeaderFooter(headerText, footerText)
+
+  let interactive: Record<string, unknown>
+  if (mode === 'catalog') {
+    interactive = {
+      type: 'catalog_message',
+      body: { text: bodyText },
+      action: { name: 'catalog_message' },
+    }
+  } else if (mode === 'product') {
+    if (!catalogId) throw new Error('A product message needs the catalogue id.')
+    if (retailerIds.length !== 1) throw new Error('A product message shows exactly one product.')
+    interactive = {
+      type: 'product',
+      body: { text: bodyText },
+      action: { catalog_id: catalogId, product_retailer_id: retailerIds[0] },
+    }
+  } else {
+    if (!catalogId) throw new Error('A product list needs the catalogue id.')
+    if (!headerText) throw new Error('A product list needs a header text.')
+    if (retailerIds.length < 1 || retailerIds.length > 30) {
+      throw new Error(`A product list shows 1-30 products (got ${retailerIds.length}).`)
+    }
+    interactive = {
+      type: 'product_list',
+      header: { type: 'text', text: headerText },
+      body: { text: bodyText },
+      action: {
+        catalog_id: catalogId,
+        sections: [
+          {
+            title: (args.sectionTitle || 'Products').slice(0, 24),
+            product_items: retailerIds.map((id) => ({ product_retailer_id: id })),
+          },
+        ],
+      },
+    }
+  }
+  if (footerText) interactive.footer = { text: footerText }
+
+  const response = await fetch(`${META_API_BASE}/${phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'interactive',
+      interactive,
+    }),
+  })
+  if (!response.ok) {
+    await throwMetaError(response, `Meta API error: ${response.status}`)
+  }
+  const data = await response.json()
+  return { messageId: data.messages[0].id }
+}

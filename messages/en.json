@@ -1078,6 +1078,7 @@
       "triggerKeywordTitle": "A message contains a keyword",
       "triggerFirstInboundTitle": "Customer's first ever inbound message",
       "triggerManualTitle": "Manual only (no auto-trigger)",
+      "triggerOrderMessageTitle": "Customer sends a catalogue cart",
       "keywordsLabel": "Keywords (comma-separated)",
       "keywordsPlaceholder": "support, help, hi",
       "entryNodeTitle": "Entry node:",
@@ -1155,7 +1156,10 @@
         "filenamePlaceholder": "invoice.pdf",
         "advanceAfterSending": "After sending, advance to",
         "pickNextNode": "Pick a next node…",
-        "none": "— None —"
+        "none": "— None —",
+        "integrationConfigLabel": "Configuration (JSON)",
+        "integrationConfigHelp": "Edit the node's settings as JSON. Changes apply when the JSON is valid.",
+        "integrationConfigInvalid": "Not valid JSON - the last valid configuration is kept."
       },
       "categories": {
         "messaging": "Messaging",
@@ -1202,6 +1206,18 @@
         "end": {
           "label": "End",
           "blurb": "Ends the flow"
+        },
+        "http_fetch": {
+          "label": "Call API",
+          "blurb": "Calls an external API and saves the reply"
+        },
+        "send_dynamic_choices": {
+          "label": "Send choices from data",
+          "blurb": "Buttons or a list built from saved data"
+        },
+        "send_products": {
+          "label": "Send products",
+          "blurb": "Shows catalogue products with images"
         }
       }
     },

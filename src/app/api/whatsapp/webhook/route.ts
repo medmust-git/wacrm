@@ -68,6 +68,21 @@ interface WhatsAppMessage {
    * payload and mirrors the label into it).
    */
   button?: { text?: string; payload?: string }
+  /**
+   * A cart sent from the WhatsApp catalogue. Was unhandled: it fell to the
+   * `default` branch as "[Unsupported message type: order]" and the items
+   * were lost, so a customer who built a cart got no answer.
+   */
+  order?: {
+    catalog_id?: string
+    text?: string
+    product_items?: Array<{
+      product_retailer_id?: string
+      quantity?: number | string
+      item_price?: number | string
+      currency?: string
+    }>
+  }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
 }
@@ -794,7 +809,14 @@ async function processMessage(
     contactId: contactRecord.id,
     conversationId: conversation.id,
     message:
-      interactiveReplyId
+      message.type === 'order'
+        ? {
+            kind: 'order',
+            catalog_id: message.order?.catalog_id ?? null,
+            items: inboundOrderItems(message),
+            meta_message_id: message.id,
+          }
+        : interactiveReplyId
         ? {
             kind: 'interactive_reply',
             reply_id: interactiveReplyId,
@@ -1094,12 +1116,38 @@ async function parseMessageContent(
       }
     }
 
+    case 'order': {
+      // Stored as a readable line for the inbox; the structured items go to
+      // the Flows engine via `inboundOrderItems` below.
+      const items = inboundOrderItems(message)
+      const summary = items.length
+        ? items.map((item) => `${item.quantity} × ${item.product_retailer_id}`).join(', ')
+        : 'no items'
+      return {
+        ...empty,
+        contentText: `[Cart] ${summary}${message.order?.text ? ` - ${message.order.text}` : ''}`,
+      }
+    }
+
     default:
       return {
         ...empty,
         contentText: `[Unsupported message type: ${message.type}]`,
       }
   }
+}
+
+/** The items of a catalogue cart, normalised and bounded. */
+function inboundOrderItems(message: Pick<WhatsAppMessage, 'order'>) {
+  return (message.order?.product_items ?? [])
+    .map((item) => ({
+      product_retailer_id: String(item.product_retailer_id ?? '').trim(),
+      quantity: Math.max(1, Math.floor(Number(item.quantity ?? 1)) || 1),
+      item_price: item.item_price === undefined ? null : Number(item.item_price),
+      currency: item.currency ?? null,
+    }))
+    .filter((item) => item.product_retailer_id)
+    .slice(0, 50)
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

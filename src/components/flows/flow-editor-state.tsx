@@ -61,7 +61,7 @@ import { NODE_META, slugify, type BuilderNode, type NodeType } from "./shared";
 export interface BuilderState {
   name: string;
   description: string;
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "manual" | "order_message";
   trigger_config: Record<string, unknown>;
   entry_node_id: string | null;
   status: FlowRow["status"];
@@ -185,6 +185,37 @@ export function defaultConfigFor(type: NodeType): Record<string, unknown> {
       return { mode: "add", tag_id: "", next_node_key: "" };
     case "handoff":
       return { note: "" };
+    case "http_fetch":
+      return {
+        method: "POST",
+        url: "",
+        headers: {},
+        save_as: "response",
+        timeout_ms: 8000,
+        success_next: "",
+        error_next: "",
+      };
+    case "send_dynamic_choices":
+      return {
+        text: "",
+        button_label: "Choose",
+        source: "",
+        id_field: "id",
+        title_field: "title",
+        description_field: "description",
+        save_selection_as: "selection",
+        next_node_key: "",
+        empty_next: "",
+        extra_rows: [],
+      };
+    case "send_products":
+      return {
+        mode: "catalog",
+        body_text: "",
+        header_text: "",
+        retailer_ids: [],
+        next_node_key: "",
+      };
     case "end":
       return {};
   }

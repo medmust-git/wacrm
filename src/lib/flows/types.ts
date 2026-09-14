@@ -18,6 +18,15 @@
  * references in JSONB.
  */
 
+// Integration nodes (http_fetch, send_dynamic_choices, send_products) keep
+// their config shapes beside their pure logic in ./integrations.
+import type {
+  HttpFetchNodeConfig,
+  SendDynamicChoicesNodeConfig,
+  SendProductsNodeConfig,
+} from "./integrations";
+export type { HttpFetchNodeConfig, SendDynamicChoicesNodeConfig, SendProductsNodeConfig };
+
 // ============================================================
 // Node configs (discriminated union by node_type)
 // ============================================================
@@ -140,7 +149,10 @@ export type ConditionOperator =
   | "equals"
   | "contains"
   | "present"
-  | "absent";
+  | "absent"
+  /** Numeric comparisons; false when either side is not a number. */
+  | "gt"
+  | "lt";
 
 export type ConditionSubject = "var" | "tag" | "contact_field";
 
@@ -194,6 +206,9 @@ export type FlowNodeConfig =
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
   | { node_type: "handoff"; config: HandoffNodeConfig }
+  | { node_type: "http_fetch"; config: HttpFetchNodeConfig }
+  | { node_type: "send_dynamic_choices"; config: SendDynamicChoicesNodeConfig }
+  | { node_type: "send_products"; config: SendProductsNodeConfig }
   | { node_type: "end"; config: EndNodeConfig };
 
 export type FlowNodeType = FlowNodeConfig["node_type"];
@@ -205,8 +220,19 @@ export type FlowNodeType = FlowNodeConfig["node_type"];
 export interface KeywordTriggerConfig {
   /** One or more keywords. Match is case-insensitive by default. */
   keywords: string[];
-  match_type?: "exact" | "contains";
+  /**
+   * `word` matches a keyword only as a whole word, so "hi" does not fire on
+   * "which". Prefer it for short keywords.
+   */
+  match_type?: "exact" | "contains" | "word";
   case_sensitive?: boolean;
+  /**
+   * When true, a matching message ENDS the contact's current run (of any
+   * flow) and starts this one. For "menu", "agent", "stop": without it a
+   * customer mid-flow can never get back to the menu, because an active run
+   * never evaluates other flows' keywords.
+   */
+  interrupt?: boolean;
 }
 
 // No knobs in v1 — the trigger has a single semantic. Kept as a type
@@ -217,7 +243,8 @@ export type FirstInboundTriggerConfig = Record<string, never>;
 export type FlowTriggerConfig =
   | { trigger_type: "keyword"; config: KeywordTriggerConfig }
   | { trigger_type: "first_inbound_message"; config: FirstInboundTriggerConfig }
-  | { trigger_type: "manual"; config: Record<string, never> };
+  | { trigger_type: "manual"; config: Record<string, never> }
+  | { trigger_type: "order_message"; config: Record<string, never> };
 
 // ============================================================
 // DB-row shapes (read by the engine via supabaseAdmin)
@@ -234,7 +261,7 @@ export interface FlowRow {
   name: string;
   description: string | null;
   status: "draft" | "active" | "archived";
-  trigger_type: "keyword" | "first_inbound_message" | "manual";
+  trigger_type: "keyword" | "first_inbound_message" | "manual" | "order_message";
   trigger_config: KeywordTriggerConfig | FirstInboundTriggerConfig | Record<string, unknown>;
   entry_node_id: string | null;
   fallback_policy: FlowFallbackPolicy;
@@ -327,7 +354,21 @@ export type ParsedInbound =
       /** The visible title of the tapped option (for logging). */
       reply_title: string;
       meta_message_id: string;
+    }
+  | {
+      /** A cart sent from the WhatsApp catalogue. */
+      kind: "order";
+      catalog_id: string | null;
+      items: InboundOrderItem[];
+      meta_message_id: string;
     };
+
+export interface InboundOrderItem {
+  product_retailer_id: string;
+  quantity: number;
+  item_price: number | null;
+  currency: string | null;
+}
 
 export interface DispatchInboundInput {
   /** Account tenancy key. Drives the lookup of active flows and the

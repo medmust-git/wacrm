@@ -23,6 +23,11 @@
  */
 
 import type { BuilderNode } from "@/components/flows/shared";
+import {
+  applyIntegrationEdge,
+  integrationEdges,
+  unlinkIntegrationReferences,
+} from "./integrations";
 
 export interface CanvasEdge {
   /** Stable per-edge id — required by React-Flow. */
@@ -138,6 +143,21 @@ export function deriveCanvasEdges(nodes: BuilderNode[]): CanvasEdge[] {
         break;
       }
 
+      case "http_fetch":
+      case "send_dynamic_choices":
+      case "send_products":
+        for (const edge of integrationEdges(node) ?? []) {
+          if (!edge.target || !knownKeys.has(edge.target)) continue;
+          edges.push({
+            id: `${node.node_key}--${edge.slot}--${edge.target}`,
+            source: node.node_key,
+            target: edge.target,
+            sourceHandle: edge.slot,
+            label: edge.label,
+          });
+        }
+        break;
+
       case "handoff":
       case "end":
         // Terminal nodes — no outgoing edges.
@@ -226,6 +246,11 @@ export function outgoingSlots(node: BuilderNode): OutgoingSlot[] {
       return slots;
     }
 
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      return (integrationEdges(node) ?? []).map((edge) => ({ id: edge.slot, label: edge.label }));
+
     case "handoff":
     case "end":
       return [];
@@ -309,6 +334,11 @@ export function applyEdgeConnection(
       });
       return matched ? { sections: next } : null;
     }
+
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      return applyIntegrationEdge(node, sourceHandle, targetKey);
 
     case "handoff":
     case "end":
@@ -403,6 +433,11 @@ function patchedConfigWithoutKey(
       });
       return dirty ? { ...cfg, sections: next } : null;
     }
+
+    case "http_fetch":
+    case "send_dynamic_choices":
+    case "send_products":
+      return unlinkIntegrationReferences(node, deletedKey);
 
     case "handoff":
     case "end":

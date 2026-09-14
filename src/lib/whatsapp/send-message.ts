@@ -88,6 +88,19 @@ export interface SendMessageParams {
   /** Structured payload for `messageType === 'interactive'`. */
   interactivePayload?: InteractiveMessagePayload | null;
   replyToMessageId?: string | null;
+  /**
+   * A system notification (an order update from an integration), not a person
+   * typing. Recorded as `sender_type: 'bot'` and leaves any active flow run
+   * alone.
+   *
+   * Both halves matter. Pausing the run meant an order update landing
+   * mid-conversation silently ended the customer's bot session. Recording it
+   * as `agent` meant the flow engine's human-handling guard - "an agent wrote
+   * in the last twelve hours" - kept the bot away for half a day after every
+   * shipping message, exactly when the customer is most likely to ask about
+   * the parcel.
+   */
+  automated?: boolean;
 }
 
 export interface SendMessageResult {
@@ -472,7 +485,7 @@ export async function sendMessageToConversation(
     .from('messages')
     .insert({
       conversation_id: conversationId,
-      sender_type: 'agent',
+      sender_type: params.automated ? 'bot' : 'agent',
       content_type: messageType,
       content_text: persistedText,
       media_url: mediaUrl || null,
@@ -508,6 +521,11 @@ export async function sendMessageToConversation(
       updated_at: new Date().toISOString(),
     })
     .eq('id', conversationId);
+
+  // An automated notification is not a human stepping in; see `automated`.
+  if (params.automated) {
+    return { messageId: messageRecord.id, whatsappMessageId: waMessageId };
+  }
 
   // Pause any active Flow run for this contact — the agent stepping in
   // is the strongest "yield, human is here" signal. Best-effort.
