@@ -146,6 +146,7 @@ export function deriveCanvasEdges(nodes: BuilderNode[]): CanvasEdge[] {
       case "http_fetch":
       case "send_dynamic_choices":
       case "send_products":
+      case "set_vars":
         for (const edge of integrationEdges(node) ?? []) {
           if (!edge.target || !knownKeys.has(edge.target)) continue;
           edges.push({
@@ -249,6 +250,7 @@ export function outgoingSlots(node: BuilderNode): OutgoingSlot[] {
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+      case "set_vars":
       return (integrationEdges(node) ?? []).map((edge) => ({ id: edge.slot, label: edge.label }));
 
     case "handoff":
@@ -338,6 +340,7 @@ export function applyEdgeConnection(
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+      case "set_vars":
       return applyIntegrationEdge(node, sourceHandle, targetKey);
 
     case "handoff":
@@ -437,6 +440,7 @@ function patchedConfigWithoutKey(
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+      case "set_vars":
       return unlinkIntegrationReferences(node, deletedKey);
 
     case "handoff":

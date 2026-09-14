@@ -705,6 +705,7 @@ function validateNode(
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+    case "set_vars":
       issues.push(...validateIntegrationNode(node, knownKeys));
       break;
 
@@ -795,6 +796,7 @@ function outgoingEdges(node: NodeInput): string[] {
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+    case "set_vars":
       return (integrationEdges(node) ?? []).map((edge) => edge.target).filter((k): k is string => !!k);
     case "handoff":
     case "end":
@@ -855,6 +857,15 @@ function validateIntegrationNode(node: NodeInput, knownKeys: Set<string>): Valid
       seen.add(id);
       if (!text(row.title)) error(`extra_rows.${index}.title`, "Each extra row needs a title.");
     });
+  }
+
+  if (node.node_type === "set_vars") {
+    const values = cfg.values && typeof cfg.values === "object" && !Array.isArray(cfg.values) ? (cfg.values as Record<string, unknown>) : null;
+    if (!values || Object.keys(values).length === 0) error("values", "Set variables needs at least one variable.");
+    for (const [key, value] of Object.entries(values ?? {})) {
+      if (!VAR_KEY.test(key)) error(`values.${key}`, `"${key}" is not a valid variable name.`);
+      if (typeof value !== "string") error(`values.${key}`, `The value for "${key}" must be text.`);
+    }
   }
 
   if (node.node_type === "send_products") {

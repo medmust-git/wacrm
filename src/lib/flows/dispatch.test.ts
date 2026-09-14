@@ -410,6 +410,53 @@ describe("dispatchInboundToFlows — humans, interrupts and carts", () => {
     expect(startedRuns()[0].row.vars).toEqual({ cart: items, catalog_id: "cat-1" });
   });
 
+  it("seeds the lowercased trigger text so a condition can route by intent", async () => {
+    h.state.flows = [KEYWORD_FLOW];
+    await dispatch({ kind: "text", text: "Order STATUS please", meta_message_id: "m5" });
+    expect(startedRuns()[0].row.vars).toEqual({ trigger_text: "order status please" });
+  });
+
+  describe("interrupt_keywords", () => {
+    const CARE_FLOW = {
+      ...KEYWORD_FLOW,
+      id: "flow-care",
+      trigger_config: { keywords: ["order", "menu"], match_type: "word", interrupt_keywords: ["menu"] },
+    };
+    const RUNNING = {
+      id: "old-run",
+      flow_id: "flow-care",
+      account_id: "acct-1",
+      user_id: "u-1",
+      contact_id: "ct-1",
+      conversation_id: "cv-1",
+      status: "active",
+      current_node_key: "greet",
+      vars: {},
+      reprompt_count: 0,
+    };
+
+    it("does not restart the flow when a non-interrupt keyword is typed mid-run", async () => {
+      h.state.activeRuns = [RUNNING];
+      h.state.flows = [CARE_FLOW];
+      await dispatch({ kind: "text", text: "my order", meta_message_id: "m6" });
+      expect(startedRuns()).toEqual([]);
+    });
+
+    it("restarts it on an interrupt keyword", async () => {
+      h.state.activeRuns = [RUNNING];
+      h.state.flows = [CARE_FLOW];
+      await dispatch({ kind: "text", text: "menu", meta_message_id: "m7" });
+      expect(startedRuns()).toHaveLength(1);
+    });
+
+    it("lets only the interrupt keyword through while a person is handling the chat", async () => {
+      h.state.flows = [CARE_FLOW];
+      h.state.conversations = [{ status: "pending" }];
+      expect((await dispatch({ kind: "text", text: "order", meta_message_id: "m8" })).consumed).toBe(false);
+      expect((await dispatch({ kind: "text", text: "menu", meta_message_id: "m9" })).consumed).toBe(true);
+    });
+  });
+
   it("never starts a keyword flow from a cart", async () => {
     h.state.flows = [{ ...KEYWORD_FLOW, trigger_config: { keywords: ["order"] } }];
     const result = await dispatch({ kind: "order", catalog_id: null, items: [], meta_message_id: "m4" });

@@ -22,6 +22,7 @@ import {
   Globe,
   LayoutList,
   ShoppingBag,
+  Variable,
   Inbox,
   ListChecks,
   ListPlus,
@@ -56,6 +57,7 @@ export type NodeType =
   | 'http_fetch'
   | 'send_dynamic_choices'
   | 'send_products'
+  | 'set_vars'
   | 'end';
 
 export interface BuilderNode {
@@ -172,6 +174,13 @@ export const NODE_META: Record<
     blurb: 'Buttons or a list built from saved data',
     category: 'messaging',
   },
+  set_vars: {
+    label: 'Set variables',
+    icon: Variable,
+    color: 'text-yellow-400',
+    blurb: 'Saves values for later steps',
+    category: 'logic',
+  },
   send_products: {
     label: 'Send products',
     icon: ShoppingBag,
@@ -236,6 +245,7 @@ const NODE_HUE: Record<NodeType, { l: number; c: number; h: number }> = {
   http_fetch: { l: 0.7, c: 0.14, h: 130 }, // lime — reaches outside
   send_dynamic_choices: { l: 0.62, c: 0.16, h: 305 }, // violet — data-driven choices
   send_products: { l: 0.7, c: 0.15, h: 45 }, // orange — the shop
+  set_vars: { l: 0.78, c: 0.14, h: 95 }, // yellow — bookkeeping
   end: { l: 0.55, c: 0.01, h: 260 }, // neutral grey — terminal
 };
 
@@ -464,6 +474,10 @@ export function summarizeNode(
       const text = typeof cfg.text === 'string' ? cfg.text : '';
       const source = typeof cfg.source === 'string' ? cfg.source : '';
       return text || source ? `${truncate(text, 40)}${source ? ` · from vars.${source}` : ''}` : null;
+    }
+    case 'set_vars': {
+      const values = cfg.values && typeof cfg.values === 'object' ? Object.keys(cfg.values as object) : [];
+      return values.length ? `vars.${values.join(', vars.')}` : null;
     }
     case 'send_products': {
       const mode = typeof cfg.mode === 'string' ? cfg.mode : 'catalog';

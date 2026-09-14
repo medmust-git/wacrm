@@ -41,6 +41,7 @@ import {
   engineSendText,
 } from "./meta-send";
 import {
+  computeSetVars,
   executeHttpFetch,
   interpolateTemplate,
   matchDynamicReply,
@@ -52,6 +53,7 @@ import {
   type InterpolationContext,
   type SendDynamicChoicesNodeConfig,
   type SendProductsNodeConfig,
+  type SetVarsNodeConfig,
 } from "./integrations";
 import { isDeliverableUrl } from "@/lib/webhooks/ssrf";
 import { matchesWholeWord } from "@/lib/automations/engine";
@@ -163,7 +165,8 @@ export function isAutoAdvancing(node_type: string): boolean {
     node_type === "condition" ||
     node_type === "set_tag" ||
     node_type === "http_fetch" ||
-    node_type === "send_products"
+    node_type === "send_products" ||
+    node_type === "set_vars"
   );
 }
 
@@ -420,7 +423,14 @@ async function findEntryFlow(
 
 /** Whether a flow is an interrupt: a keyword flow allowed to end another run. */
 export function isInterruptFlow(flow: Pick<FlowRow, "trigger_type" | "trigger_config">): boolean {
-  return flow.trigger_type === "keyword" && (flow.trigger_config as KeywordTriggerConfig)?.interrupt === true;
+  if (flow.trigger_type !== "keyword") return false;
+  const cfg = flow.trigger_config as KeywordTriggerConfig;
+  return cfg?.interrupt === true || Boolean(cfg?.interrupt_keywords?.length);
+}
+
+/** The keyword config an interrupt is matched with: `interrupt_keywords` when set, else all keywords. */
+export function interruptTriggerConfig(cfg: KeywordTriggerConfig): KeywordTriggerConfig {
+  return cfg.interrupt_keywords?.length ? { ...cfg, keywords: cfg.interrupt_keywords } : cfg;
 }
 
 /**
@@ -445,7 +455,8 @@ async function findInterruptFlow(
     .order("created_at", { ascending: true });
   for (const flow of (data ?? []) as FlowRow[]) {
     if (!isInterruptFlow(flow)) continue;
-    if (candidates.some((text) => matchesKeywordTrigger(text, flow.trigger_config as KeywordTriggerConfig))) {
+    const cfg = interruptTriggerConfig(flow.trigger_config as KeywordTriggerConfig);
+    if (candidates.some((text) => matchesKeywordTrigger(text, cfg))) {
       return flow;
     }
   }
@@ -980,6 +991,21 @@ async function advanceFromNodeKey(
       currentKey = outcome.ok ? cfg.success_next : cfg.error_next;
       continue;
     }
+    if (node.node_type === "set_vars") {
+      const cfg = node.config as unknown as SetVarsNodeConfig;
+      try {
+        await saveVars(db, run, computeSetVars(cfg, await contextFor(db, run)));
+      } catch (err) {
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "set_vars_failed",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        await endRun(db, run.id, "failed", "set_vars_failed");
+        return { outcome: "completed" };
+      }
+      currentKey = cfg.next_node_key;
+      continue;
+    }
     if (node.node_type === "send_products") {
       const cfg = node.config as unknown as SendProductsNodeConfig;
       const retailerIds = resolveRetailerIds(cfg, run.vars);
@@ -1204,12 +1230,14 @@ export async function dispatchInboundToFlows(
     if (!flow || !flow.entry_node_id) {
       return { consumed: false, outcome: "no_match" };
     }
-    if (
-      !isInterruptFlow(flow) &&
-      input.message.kind !== "order" &&
-      (await humanIsHandling(db, input.conversationId))
-    ) {
-      return { consumed: false, outcome: "no_match" };
+    if (input.message.kind !== "order" && (await humanIsHandling(db, input.conversationId))) {
+      // Only an explicit request for the bot ("menu") overrides a person.
+      const askedForBot =
+        isInterruptFlow(flow) &&
+        entryTriggerTexts(input.message).some((text) =>
+          matchesKeywordTrigger(text, interruptTriggerConfig(flow.trigger_config as KeywordTriggerConfig)),
+        );
+      if (!askedForBot) return { consumed: false, outcome: "no_match" };
     }
     const nodes = await loadAllNodes(db, flow.id);
     return startNewRun(db, flow, input, nodes);
@@ -1441,7 +1469,13 @@ async function startNewRun(
       vars:
         input.message.kind === "order"
           ? { cart: input.message.items, catalog_id: input.message.catalog_id }
-          : {},
+          : {
+              // What the customer said to start the run, lowercased, so a
+              // condition node can route "where is my order" straight to
+              // tracking instead of showing the menu first. Condition
+              // `contains` is case-sensitive, hence the lowercasing.
+              trigger_text: entryTriggerTexts(input.message).join(" ").toLowerCase().slice(0, 500),
+            },
     })
     .select("*")
     .maybeSingle();

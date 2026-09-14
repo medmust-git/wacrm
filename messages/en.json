@@ -1218,6 +1218,10 @@
         "send_products": {
           "label": "Send products",
           "blurb": "Shows catalogue products with images"
+        },
+        "set_vars": {
+          "label": "Set variables",
+          "blurb": "Saves values for later steps"
         }
       }
     },

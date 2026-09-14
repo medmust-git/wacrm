@@ -24,8 +24,9 @@ import type {
   HttpFetchNodeConfig,
   SendDynamicChoicesNodeConfig,
   SendProductsNodeConfig,
+  SetVarsNodeConfig,
 } from "./integrations";
-export type { HttpFetchNodeConfig, SendDynamicChoicesNodeConfig, SendProductsNodeConfig };
+export type { HttpFetchNodeConfig, SendDynamicChoicesNodeConfig, SendProductsNodeConfig, SetVarsNodeConfig };
 
 // ============================================================
 // Node configs (discriminated union by node_type)
@@ -209,6 +210,7 @@ export type FlowNodeConfig =
   | { node_type: "http_fetch"; config: HttpFetchNodeConfig }
   | { node_type: "send_dynamic_choices"; config: SendDynamicChoicesNodeConfig }
   | { node_type: "send_products"; config: SendProductsNodeConfig }
+  | { node_type: "set_vars"; config: SetVarsNodeConfig }
   | { node_type: "end"; config: EndNodeConfig };
 
 export type FlowNodeType = FlowNodeConfig["node_type"];
@@ -233,6 +235,13 @@ export interface KeywordTriggerConfig {
    * never evaluates other flows' keywords.
    */
   interrupt?: boolean;
+  /**
+   * When set, ONLY these keywords interrupt a running flow; the rest of
+   * `keywords` start this flow only when nothing is running. Lets one menu
+   * flow start on "order" when idle without "order", typed as an answer to a
+   * question, restarting the menu. Implies `interrupt` for these words.
+   */
+  interrupt_keywords?: string[];
 }
 
 // No knobs in v1 — the trigger has a single semantic. Kept as a type

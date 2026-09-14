@@ -703,6 +703,7 @@ const ADD_NODE_TYPES: NodeType[] = [
   'http_fetch',
   'send_dynamic_choices',
   'send_products',
+  'set_vars',
   'handoff',
   'end',
 ];

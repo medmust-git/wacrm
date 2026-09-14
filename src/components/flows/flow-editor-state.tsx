@@ -208,6 +208,8 @@ export function defaultConfigFor(type: NodeType): Record<string, unknown> {
         empty_next: "",
         extra_rows: [],
       };
+    case "set_vars":
+      return { values: {}, next_node_key: "" };
     case "send_products":
       return {
         mode: "catalog",

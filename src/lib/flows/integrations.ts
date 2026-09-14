@@ -28,6 +28,28 @@ import type { FlowNodeRow } from "./types";
 // Config shapes
 // ============================================================
 
+/**
+ * Sets run variables from templates, then advances.
+ *
+ * Exists so branches can converge: the order a customer picked from a list
+ * and the order they typed the number of arrive in different variables, and
+ * everything after ("show it", "send its invoice") should read one.
+ * Values are stored as strings; an empty template clears a variable.
+ */
+export interface SetVarsNodeConfig {
+  values: Record<string, string>;
+  next_node_key: string;
+}
+
+export function computeSetVars(cfg: SetVarsNodeConfig, ctx: InterpolationContext): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, template] of Object.entries(cfg.values ?? {})) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) continue;
+    out[key] = interpolateTemplate(template, ctx);
+  }
+  return out;
+}
+
 export interface HttpFetchNodeConfig {
   method: "GET" | "POST";
   /** May contain placeholders; values are URL-encoded when substituted. */
@@ -440,6 +462,8 @@ export function integrationEdges(node: { node_type: string; config: Record<strin
         })),
       ];
     }
+    case "set_vars":
+      return [{ slot: "next", label: "next", field: "next_node_key", target: text(cfg.next_node_key) }];
     case "send_products": {
       const edges: IntegrationEdge[] = [{ slot: "next", label: "next", field: "next_node_key", target: text(cfg.next_node_key) }];
       if (text(cfg.empty_next)) edges.push({ slot: "empty", label: "empty", field: "empty_next", target: text(cfg.empty_next) });

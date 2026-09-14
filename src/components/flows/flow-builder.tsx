@@ -595,6 +595,7 @@ function AddNodeButton({ onAdd, t }: { onAdd: (type: NodeType) => void; t: Retur
     'http_fetch',
     'send_dynamic_choices',
     'send_products',
+    'set_vars',
     'handoff',
     'end',
   ];

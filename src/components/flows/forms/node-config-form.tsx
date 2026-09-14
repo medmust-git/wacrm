@@ -209,6 +209,7 @@ export function NodeConfigForm({
     case "http_fetch":
     case "send_dynamic_choices":
     case "send_products":
+    case "set_vars":
       return (
         <IntegrationConfigForm
           node={node}
