@@ -12,7 +12,9 @@
     "signingIn": "Entrando...",
     "signIn": "Entrar",
     "noAccount": "Não tem uma conta?",
-    "createAccount": "Criar conta"
+    "createAccount": "Criar conta",
+    "linkExpired": "Esse link expirou. Para redefinir a senha, use “Esqueceu a senha?” para pedir um novo; se estava confirmando seu e-mail, cadastre-se novamente.",
+    "linkInvalid": "Não foi possível entrar com esse link. Se estava confirmando seu e-mail, ele já pode estar verificado — basta entrar abaixo. Para redefinir a senha, peça um novo link e abra-o no mesmo navegador em que o solicitou."
   },
   "Sidebar": {
     "title": "Modelo de CRM para WhatsApp",
@@ -391,7 +393,8 @@
       "dupSimilar": "Já existe um contato com um número muito parecido.",
       "loadingTags": "Carregando tags...",
       "noTagsAvailable": "Nenhuma tag disponível. Crie tags em Configurações.",
-      "phoneRequired": "O número de telefone é obrigatório"
+      "phoneRequired": "O número de telefone é obrigatório",
+      "phoneNeedsCountryCode": "Inclua o código do país — o número deve começar com + (ex.: +5511999990000)"
     },
     "detailView": {
       "tabs": {
@@ -443,6 +446,7 @@
       "saveChangesBtn": "Salvar alterações",
       "saveCustomFieldsBtn": "Salvar campos personalizados",
       "toastPhoneRequired": "O número de telefone é obrigatório",
+      "toastPhoneNeedsCountryCode": "Inclua o código do país — o número deve começar com + (ex.: +5511999990000)",
       "toastUpdateFailed": "Falha ao atualizar o contato",
       "toastUpdated": "Contato atualizado",
       "toastNotAuthenticated": "Não autenticado",
@@ -477,6 +481,7 @@
       "resultFailed": "{count} com falha",
       "failedRowsHeading": "Linhas com falha",
       "unknownReason": "Erro desconhecido",
+      "invalidPhoneHint": "Os números de telefone devem começar com + e o código do país (ex.: +5511999990000). Números sem código seriam entregues no país errado.",
       "willBeCreated": "{name} (será criada na importação)",
       "columns": {
         "phone": "Telefone",
@@ -772,6 +777,7 @@
         "uploadCsv": "Enviar arquivo CSV",
         "csvFormatDesc": "Deve conter uma coluna 'phone' (formato E.164). A coluna 'name' é opcional.",
         "csvContactsFound": "{count} contato(s) válido(s) encontrado(s) no CSV.",
+        "csvInvalidPhones": "{count} linha(s) ignorada(s): os números de telefone devem começar com + e o código do país (ex.: +5511999990000).",
         "errorLoadTags": "Falha ao carregar as tags",
         "errorLoadFields": "Falha ao carregar os campos personalizados",
         "errorCsvParse": "Não foi possível ler o arquivo CSV.",
@@ -1604,6 +1610,7 @@
       "webhookVerifyToken": "Token de verificação do webhook",
       "webhookVerifyTokenPlaceholder": "Crie um token de verificação personalizado",
       "webhookVerifyTokenHint": "Uma string personalizada criada por você. Deve corresponder ao token definido nas configurações de webhook da Meta.",
+      "webhookVerifyTokenSaved": "Salvo. Deixe como está para mantê-lo ou digite um novo valor para trocá-lo.",
       "twoStepPin": "PIN de verificação em duas etapas",
       "optional": "(opcional)",
       "pinPlaceholder": "PIN de 6 dígitos do Gerenciador do WhatsApp da Meta",
@@ -1937,6 +1944,26 @@
     "emailPlaceholder": "you@example.com",
     "sending": "Enviando...",
     "sendLink": "Enviar link de redefinição"
+  },
+  "ResetPasswordPage": {
+    "title": "Escolha uma nova senha",
+    "desc": "Informe uma nova senha para a sua conta.",
+    "passwordLabel": "Nova senha",
+    "passwordPlaceholder": "Pelo menos 6 caracteres",
+    "confirmPasswordLabel": "Confirmar nova senha",
+    "confirmPasswordPlaceholder": "Repita a nova senha",
+    "submit": "Atualizar senha",
+    "saving": "Atualizando...",
+    "passwordsMismatch": "As senhas não coincidem",
+    "passwordTooShort": "A senha deve ter pelo menos 6 caracteres",
+    "checking": "Verificando seu link...",
+    "expiredTitle": "Este link não é mais válido",
+    "expiredDesc": "Links de redefinição de senha funcionam uma vez e expiram em pouco tempo. Peça um novo e abra-o no mesmo navegador em que o solicitou.",
+    "requestNewLink": "Pedir um novo link",
+    "backToSignIn": "Voltar ao login",
+    "successTitle": "Senha atualizada",
+    "successDesc": "Você está conectado com a nova senha.",
+    "continueToDashboard": "Ir para o painel"
   },
   "JoinPage": {
     "fail": {
