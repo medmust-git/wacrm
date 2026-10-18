@@ -125,3 +125,96 @@ export function buildPage<T extends { created_at: string; id: string }>(
   const items = rows.slice(0, limit);
   return { items, nextCursor: encodeCursor(items[items.length - 1]) };
 }
+
+// ============================================================
+// Keyset paging on a NULLABLE sort column.
+//
+// The conversations list sorts by `last_message_at`, not `created_at`:
+// an inbox is ordered by what happened last, not by when a thread was
+// first opened. That column is nullable (a conversation created with
+// no message yet), so the ordering is
+//
+//   last_message_at DESC NULLS LAST, id DESC
+//
+// and the cursor has to be able to sit in the null section. The
+// helpers above stay as they are - contacts, messages and broadcasts
+// still page by a non-null `created_at`, and changing their cursor
+// shape would invalidate every cursor already in flight.
+// ============================================================
+
+export interface SortCursor {
+  /** The sort column's value, or null when the cursor row had none. */
+  value: string | null;
+  id: string;
+}
+
+/** Encode a `(sortValue, id)` cursor. A null value encodes as empty. */
+export function encodeSortCursor(value: string | null, id: string): string {
+  return Buffer.from(`${value ?? ''}|${id}`, 'utf8').toString('base64url');
+}
+
+/**
+ * Decode a sort cursor, or null if missing/malformed/untrusted. Same
+ * contract as `decodeCursor`: anything not plausibly server-issued is
+ * treated as "no cursor" rather than erroring, because the values are
+ * interpolated raw into a PostgREST filter.
+ */
+export function decodeSortCursor(raw: string | null): SortCursor | null {
+  if (!raw) return null;
+  try {
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const sep = decoded.indexOf('|');
+    if (sep === -1) return null;
+    const value = decoded.slice(0, sep);
+    const id = decoded.slice(sep + 1);
+    if (!UUID_RE.test(id)) return null;
+    // An empty value is the null section of the ordering, which is a
+    // legitimate place for a cursor to be. Anything else must parse as
+    // a timestamp.
+    if (value === '') return { value: null, id };
+    if (Number.isNaN(Date.parse(value))) return null;
+    return { value, id };
+  } catch {
+    return null;
+  }
+}
+
+/** The raw `?cursor=` string, for routes decoding it themselves. */
+export function rawCursor(request: Request): string | null {
+  return new URL(request.url).searchParams.get('cursor');
+}
+
+/**
+ * PostgREST `.or()` expression walking past a cursor row under
+ * `<column> DESC NULLS LAST, id DESC`, or null when the cursor sits in
+ * the null section - that case cannot be expressed as one `.or()` and
+ * the caller applies `.is(column, null).lt('id', cursor.id)` instead.
+ */
+export function nullableKeysetFilter(
+  column: string,
+  cursor: SortCursor
+): string | null {
+  if (cursor.value === null) return null;
+  // Strictly older, or the same instant with a smaller id, or anything
+  // in the null section - nulls sort last, so they all come after.
+  return [
+    `${column}.lt.${cursor.value}`,
+    `and(${column}.eq.${cursor.value},id.lt.${cursor.id})`,
+    `${column}.is.null`,
+  ].join(',');
+}
+
+/**
+ * Trim an over-fetched page and derive the next cursor from a chosen
+ * column, rather than from `created_at`.
+ */
+export function buildSortedPage<T extends { id: string }>(
+  rows: T[],
+  limit: number,
+  sortValue: (row: T) => string | null
+): { items: T[]; nextCursor: string | null } {
+  if (rows.length <= limit) return { items: rows, nextCursor: null };
+  const items = rows.slice(0, limit);
+  const last = items[items.length - 1];
+  return { items, nextCursor: encodeSortCursor(sortValue(last), last.id) };
+}

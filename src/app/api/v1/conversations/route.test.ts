@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ eqCalls: [] as [string, unknown][] }));
+const mocks = vi.hoisted(() => ({
+  eqCalls: [] as [string, unknown][],
+  orderCalls: [] as [string, unknown][],
+}));
 
 function fakeSupabase() {
   const builder: Record<string, unknown> = {
@@ -10,7 +13,12 @@ function fakeSupabase() {
       return builder;
     },
     or: () => builder,
-    order: () => builder,
+    is: () => builder,
+    lt: () => builder,
+    order: (column: string, options: unknown) => {
+      mocks.orderCalls.push([column, options]);
+      return builder;
+    },
     limit: () => builder,
     then: (resolve: (v: { data: unknown[]; error: null }) => void) =>
       resolve({ data: [], error: null }),
@@ -46,5 +54,22 @@ describe('GET /api/v1/conversations', () => {
     );
     expect(res.status).toBe(200);
     expect(mocks.eqCalls).toContainEqual(['contact_id', contactId]);
+  });
+});
+
+describe('ordering', () => {
+  it('orders by last message, newest first, with never-messaged rows last', async () => {
+    // An inbox is sorted by what happened last. Ordering by `created_at`
+    // put a customer who wrote minutes ago below a conversation opened
+    // months earlier, which is what made this list useless as a queue.
+    mocks.orderCalls.length = 0;
+    await GET(new Request('https://x.test/api/v1/conversations'));
+    expect(mocks.orderCalls[0]).toEqual([
+      'last_message_at',
+      { ascending: false, nullsFirst: false },
+    ]);
+    // id breaks the tie, and is what the keyset cursor pages on.
+    expect(mocks.orderCalls[1]).toEqual(['id', { ascending: false }]);
+    expect(mocks.orderCalls.map(([column]) => column)).not.toContain('created_at');
   });
 });

@@ -211,9 +211,16 @@ contact in another account returns `404`.
 
 ### `GET /api/v1/conversations`
 
-List conversations, newest first. Scope: `conversations:read`.
+List conversations, **most recently messaged first**. Scope:
+`conversations:read`.
 Paginated. Optional filters: `?status=` (`open` / `pending` / `closed`)
 and `?contact_id=`. Each conversation embeds its contact + tags.
+
+Ordered by `last_message_at` descending, with conversations that have
+no message yet last. An inbox is a queue of what happened last, not of
+what was created first — a contact who wrote minutes ago must not sit
+below a thread opened months earlier. The cursor keys on the same
+column, so paging and ordering agree.
 
 ### `GET /api/v1/conversations/{id}`
 
@@ -227,6 +234,30 @@ Paginated. Each message includes its `direction` (`inbound` /
 `outbound`), `status` (delivery state), `whatsapp_message_id`, and
 `content_*`. The conversation is verified to belong to your account
 first (`404` otherwise).
+
+`media_url` is normally an absolute Storage URL that needs no
+credentials. When inbound mirroring is off or failed it is instead the
+relative path `/api/whatsapp/media/<id>`, which the dashboard route
+serves only to a signed-in session — fetch those through
+[`GET /api/v1/media/{id}`](#get-apiv1mediaid) instead. `media_type`
+carries the MIME type for inbound media, so a client picks a renderer
+without guessing from the URL.
+
+### `GET /api/v1/media/{id}`
+
+Fetch an attachment's bytes. Scope: `messages:read`. Use it for a
+`media_url` that is a relative `/api/whatsapp/media/<id>` path; an
+absolute URL can be fetched directly.
+
+The id is WhatsApp's media id — the last segment of that path. The
+response streams the file with a locked-down CSP, `sandbox`, and an
+attachment disposition for anything not inline-safe. Meta expires
+media after roughly 30 days; after that this returns `404 not_found`
+rather than a server error, because an expired attachment is an
+expected state, not a fault.
+
+Rate limited per account rather than per key, since the cost being
+bounded is Meta's download bandwidth.
 
 ### `GET /api/v1/templates`
 
