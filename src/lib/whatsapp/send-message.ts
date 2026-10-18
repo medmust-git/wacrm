@@ -41,11 +41,13 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
+import { applyPendingMessageStatuses } from '@/lib/whatsapp/message-status-sync';
 import type { MessageTemplate } from '@/types';
 import {
   resolveTemplateRow,
   templateBodyParams,
   templateContentText,
+  templateHeaderMediaUrl,
 } from '@/lib/whatsapp/template-body';
 
 export const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const;
@@ -100,6 +102,7 @@ export interface SendMessageParams {
    * the parcel.
    */
   automated?: boolean;
+  senderId?: string | null;
 }
 
 export interface SendMessageResult {
@@ -209,6 +212,7 @@ export async function sendMessageToConversation(
     filename,
     templateName,
     templateLanguage,
+    senderId,
     templateParams,
     templateMessageParams,
     interactivePayload,
@@ -491,9 +495,13 @@ export async function sendMessageToConversation(
     .insert({
       conversation_id: conversationId,
       sender_type: params.automated ? 'bot' : 'agent',
+      sender_id: senderId ?? null,
       content_type: messageType,
       content_text: persistedText,
-      media_url: mediaUrl || null,
+      media_url:
+        messageType === 'template'
+          ? templateHeaderMediaUrl(templateRow, templateMessageParams)
+          : mediaUrl || null,
       template_name: templateName || null,
       interactive_payload:
         messageType === 'interactive' ? interactivePayload : null,
@@ -512,6 +520,8 @@ export async function sendMessageToConversation(
       500
     );
   }
+
+  await applyPendingMessageStatuses(supabaseAdmin(), accountId, waMessageId);
 
   const lastMessageText =
     messageType === 'interactive'

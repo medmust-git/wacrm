@@ -1,7 +1,8 @@
 -- ============================================================
--- 044_flow_set_vars.sql
+-- 101_flow_set_vars.sql
 --
--- Numbered 044 after the 2026-09-14 upstream sync; applied earlier as 041.
+-- Numbered 101 (was 041, then 044) to stay clear of upstream's sequence;
+-- already applied to production under its earlier numbers.
 --
 -- flow_nodes.node_type gains 'set_vars': sets run variables from templates.
 -- Lets branches converge - an order picked from a list and an order found

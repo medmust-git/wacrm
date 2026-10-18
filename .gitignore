@@ -43,6 +43,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# supabase
 # Supabase CLI link state. `pooler-url` holds a Postgres connection string
 # WITH the database password in it, and nothing upstream ignores this path -
 # so a `git add -A` here commits a live credential.

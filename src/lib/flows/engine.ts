@@ -61,6 +61,7 @@ import { matchesWholeWord } from "@/lib/automations/engine";
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import { addContactTagAndDispatch } from "@/lib/contacts/tag-events";
 import { removeContactTag } from "@/lib/contacts/tag-write";
+import { checkRunTimeout, markRunTimedOut, type RunTimeoutCheck } from "./timeout";
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
@@ -77,6 +78,7 @@ import {
   type SetTagNodeConfig,
   type StartNodeConfig,
   type KeywordTriggerConfig,
+  AUTO_ADVANCING_NODE_TYPES,
 } from "./types";
 
 // ============================================================
@@ -187,16 +189,36 @@ export function entryTriggerTexts(message: ParsedInbound): string[] {
 
 /** Nodes that advance to a next_node_key without waiting for input. */
 export function isAutoAdvancing(node_type: string): boolean {
-  return (
-    node_type === "start" ||
-    node_type === "send_message" ||
-    node_type === "send_media" ||
-    node_type === "condition" ||
-    node_type === "set_tag" ||
-    node_type === "http_fetch" ||
-    node_type === "send_products" ||
-    node_type === "set_vars"
+  return AUTO_ADVANCING_NODE_TYPES.has(node_type);
+}
+
+export type ActiveRunClosure =
+  | { kind: "cancel"; reason: "flow_not_active" | "current_node_removed" }
+  | { kind: "fail"; reason: "active_run_missing_current_node" }
+  | { kind: "timeout"; check: RunTimeoutCheck };
+
+export function closureForActiveRun(args: {
+  run: Pick<FlowRunRow, "current_node_key" | "last_advanced_at">;
+  flow: Pick<FlowRow, "status" | "fallback_policy"> | null;
+  nodeKeys: ReadonlySet<string> | { has(key: string): boolean };
+  now: Date;
+}): ActiveRunClosure | null {
+  if (!args.flow || args.flow.status !== "active") {
+    return { kind: "cancel", reason: "flow_not_active" };
+  }
+  const check = checkRunTimeout(
+    args.run.last_advanced_at,
+    args.flow.fallback_policy,
+    args.now,
   );
+  if (check.timedOut) return { kind: "timeout", check };
+  if (!args.run.current_node_key) {
+    return { kind: "fail", reason: "active_run_missing_current_node" };
+  }
+  if (!args.nodeKeys.has(args.run.current_node_key)) {
+    return { kind: "cancel", reason: "current_node_removed" };
+  }
+  return null;
 }
 
 /** Nodes that send a prompt and suspend awaiting a customer reply. */
@@ -844,7 +866,7 @@ function interpolateOptionalVars(
 async function endRun(
   db: AdminClient,
   runId: string,
-  status: "completed" | "handed_off" | "timed_out" | "failed",
+  status: "completed" | "handed_off" | "cancelled" | "failed",
   reason: string,
 ): Promise<void> {
   await db
@@ -854,7 +876,8 @@ async function endRun(
       ended_at: new Date().toISOString(),
       end_reason: reason,
     })
-    .eq("id", runId);
+    .eq("id", runId)
+    .eq("status", "active");
 }
 
 // ============================================================
@@ -864,6 +887,8 @@ async function endRun(
 // new current_node_key before returning.
 // ============================================================
 
+export const MAX_NODES_PER_ADVANCE = 25;
+
 async function advanceFromNodeKey(
   db: AdminClient,
   run: FlowRunRow,
@@ -871,9 +896,7 @@ async function advanceFromNodeKey(
   nodes: Map<string, FlowNodeRow>,
 ): Promise<{ outcome: "advanced" | "completed" | "handed_off" }> {
   let currentKey: string | null = startNodeKey;
-  // Defensive cap — if a flow has a cycle (which the validator
-  // SHOULD catch but doesn't yet in v1), we bail rather than loop.
-  for (let safety = 0; safety < 64; safety += 1) {
+  for (let safety = 0; safety < MAX_NODES_PER_ADVANCE; safety += 1) {
     if (!currentKey) {
       await logEvent(db, run.id, "error", null, {
         reason: "next_node_key was null mid-advance",
@@ -1283,6 +1306,58 @@ async function advanceCurrentNodeKey(
   return Array.isArray(data) && data.length > 0;
 }
 
+async function claimReplyTransition(
+  db: AdminClient,
+  run: FlowRunRow,
+  nextNodeKey: string,
+  extra: Record<string, unknown> = {},
+): Promise<boolean> {
+  const fromKey = run.current_node_key;
+  if (fromKey === null) return false;
+  const nextSeq = (run.transition_seq ?? 0) + 1;
+  const { data, error } = await db
+    .from("flow_runs")
+    .update({
+      ...extra,
+      current_node_key: nextNodeKey,
+      transition_seq: nextSeq,
+      reprompt_count: 0,
+      last_advanced_at: new Date().toISOString(),
+    })
+    .eq("id", run.id)
+    .eq("status", "active")
+    .eq("current_node_key", fromKey)
+    .eq("transition_seq", run.transition_seq ?? 0)
+    .select("id");
+  if (error) {
+    console.error("[flows] claimReplyTransition error:", error.message);
+    return false;
+  }
+  if (!Array.isArray(data) || data.length !== 1) return false;
+  run.current_node_key = nextNodeKey;
+  run.transition_seq = nextSeq;
+  run.reprompt_count = 0;
+  return true;
+}
+
+async function closeActiveRun(
+  db: AdminClient,
+  run: FlowRunRow,
+  closure: ActiveRunClosure,
+  now: Date,
+): Promise<void> {
+  if (closure.kind === "timeout") {
+    await markRunTimedOut(db, run.id, closure.check, "timed_out_on_reply", now);
+    return;
+  }
+  await endRun(
+    db,
+    run.id,
+    closure.kind === "cancel" ? "cancelled" : "failed",
+    closure.reason,
+  );
+}
+
 // ============================================================
 // Public entry point — the webhook calls this on every inbound.
 // ============================================================
@@ -1333,8 +1408,27 @@ export async function dispatchInboundToFlows(
       }
       // One SELECT for the whole flow's nodes — advance loop is now
       // in-memory. See loadAllNodes.
-      const nodes = await loadAllNodes(db, activeRun.flow_id);
-      return handleReplyForActiveRun(db, activeRun, input, nodes);
+      const [runFlow, nodes] = await Promise.all([
+        loadFlow(db, activeRun.flow_id),
+        loadAllNodes(db, activeRun.flow_id),
+      ]);
+      const now = new Date();
+      const closure = closureForActiveRun({
+        run: activeRun,
+        flow: runFlow,
+        nodeKeys: nodes,
+        now,
+      });
+      if (!closure) {
+        return handleReplyForActiveRun(
+          db,
+          activeRun,
+          runFlow!,
+          input,
+          nodes,
+        );
+      }
+      await closeActiveRun(db, activeRun, closure, now);
     }
 
     // No active run → look for a flow whose entry trigger matches.
@@ -1371,6 +1465,7 @@ export async function dispatchInboundToFlows(
 async function handleReplyForActiveRun(
   db: AdminClient,
   run: FlowRunRow,
+  flow: FlowRow,
   input: DispatchInboundInput,
   nodes: Map<string, FlowNodeRow>,
 ): Promise<DispatchInboundResult> {
@@ -1391,22 +1486,7 @@ async function handleReplyForActiveRun(
     media_type: message.kind === "media" ? message.media_type : null,
   });
 
-  if (!run.current_node_key) {
-    // Defensive — a run with status='active' but no current node is
-    // malformed. Fail the run rather than spin.
-    await endRun(db, run.id, "failed", "active_run_missing_current_node");
-    return {
-      consumed: true,
-      flow_run_id: run.id,
-      outcome: "no_match",
-    };
-  }
-
-  const currentNode = nodes.get(run.current_node_key) ?? null;
-  if (!currentNode) {
-    await endRun(db, run.id, "failed", "current_node_not_found");
-    return { consumed: true, flow_run_id: run.id, outcome: "no_match" };
-  }
+  const currentNode = nodes.get(run.current_node_key!)!;
 
   // Two ways a reply can advance:
   //   1. Interactive button/list tap on a send_buttons/send_list node.
@@ -1459,45 +1539,24 @@ async function handleReplyForActiveRun(
   ) {
     const cfg = currentNode.config as unknown as CollectInputNodeConfig;
     const captured = message.text.trim();
-    if (captured.length > 0 && cfg.var_key) {
-      // Persist captured value + reset reprompt count atomically.
+    if (captured.length > 0 && cfg.var_key && cfg.next_node_key) {
       const newVars = { ...run.vars, [cfg.var_key]: captured };
-      const { error: capErr } = await db
-        .from("flow_runs")
-        .update({
-          vars: newVars,
-          reprompt_count: 0,
-        })
-        .eq("id", run.id);
-      if (!capErr) {
-        // Mirror the UPDATE in-memory so downstream interpolation in
-        // the advance loop sees the captured var without us having to
-        // re-SELECT the whole row.
-        run.vars = newVars;
-        run.reprompt_count = 0;
-        await logEvent(db, run.id, "node_entered", currentNode.node_key, {
-          captured_key: cfg.var_key,
-          captured_length: captured.length,
-        });
-        matched = cfg.next_node_key;
+      if (!(await claimReplyTransition(db, run, cfg.next_node_key, { vars: newVars }))) {
+        return lostReplyRace(db, run, currentNode.node_key);
       }
+      run.vars = newVars;
+      await logEvent(db, run.id, "node_entered", currentNode.node_key, {
+        captured_key: cfg.var_key,
+        captured_length: captured.length,
+      });
+      const outcome = await advanceFromNodeKey(db, run, cfg.next_node_key, nodes);
+      return { consumed: true, flow_run_id: run.id, outcome: outcome.outcome };
     }
   }
 
   if (matched) {
-    // Reset reprompt count on a successful match. Skip the write when
-    // already 0 — the collect_input capture branch above already
-    // zeroed it, and interactive-reply matches against a fresh run
-    // (post-prior-reset) are also already 0. The previous re-read of
-    // the whole row was needed only because we weren't mirroring the
-    // capture UPDATE into the in-memory `run`; now that we do, the
-    // local copy is the source of truth.
-    if (run.reprompt_count !== 0) {
-      const { error } = await db
-        .from("flow_runs")
-        .update({ reprompt_count: 0 })
-        .eq("id", run.id);
-      if (!error) run.reprompt_count = 0;
+    if (!(await claimReplyTransition(db, run, matched))) {
+      return lostReplyRace(db, run, currentNode.node_key);
     }
     const outcome = await advanceFromNodeKey(db, run, matched, nodes);
     return {
@@ -1508,8 +1567,7 @@ async function handleReplyForActiveRun(
   }
 
   // No match → fallback. Apply the policy.
-  const runFlow = await loadFlow(db, run.flow_id);
-  const policy = resolveFallbackPolicy(runFlow?.fallback_policy);
+  const policy = resolveFallbackPolicy(flow.fallback_policy);
   const newReprompts = run.reprompt_count + 1;
   await db
     .from("flow_runs")
@@ -1580,12 +1638,12 @@ async function handleReplyForActiveRun(
     await endRun(db, run.id, "handed_off", "fallback_exhausted");
     return { consumed: true, flow_run_id: run.id, outcome: "handed_off" };
   }
-  if (action.type === "restart" && runFlow?.entry_node_id) {
+  if (action.type === "restart" && flow.entry_node_id) {
     // Back to the start of the same flow. The new run's trigger_text is this
     // reply, so a menu flow that routes on intent still sends a customer who
     // typed "track my order" at a product list straight to tracking.
     await endRun(db, run.id, "completed", "fallback_restart");
-    return startNewRun(db, runFlow, input, nodes, { restarted: true });
+    return startNewRun(db, flow, input, nodes, { restarted: true });
   }
   // action.type === 'end' (or a restart of a flow with no entry node)
   await endRun(db, run.id, "completed", "fallback_exhausted_end");
@@ -1633,6 +1691,21 @@ async function runStartContext(
     // Greeting context is a nicety; never block a run on it.
   }
   return context;
+}
+
+async function lostReplyRace(
+  db: AdminClient,
+  run: FlowRunRow,
+  nodeKey: string,
+): Promise<DispatchInboundResult> {
+  await logEvent(db, run.id, "error", nodeKey, {
+    reason: "lost_race_during_reply",
+  });
+  return {
+    consumed: true,
+    flow_run_id: run.id,
+    outcome: "duplicate_inbound_ignored",
+  };
 }
 
 async function startNewRun(

@@ -27,7 +27,7 @@ This happened on the 2026-09-14 sync. The fork had applied
 and `042_message_failure_reason`. Resolution:
 
 1. Renumber the fork's migrations after upstream's highest
-   (`043_flow_integrations_catalog`, `044_flow_set_vars`).
+   (`043_flow_integrations_catalog`, `044_flow_set_vars`; later moved to 100 and 101, below).
 2. Tell the database the old numbers were not upstream's, then push:
    ```bash
    supabase migration repair --status reverted 040 041
@@ -52,6 +52,26 @@ and `042_message_failure_reason`. Resolution:
 sequence, and never assume a drop-and-recreate CHECK is re-runnable once later
 migrations have widened it - a fresh database runs them in order and is fine,
 but a renumbered replay against production is not.
+
+## 2026-10-18 sync: the collision again
+
+Upstream reached 043-059 and its 043 (`storage_scoped_select`) and 044
+(`internal_definer_grants`) collided with the fork's renumbered 043 and 044
+(see above) - the same silent-skip trap. The fork's two migrations are now
+`100_flow_integrations_catalog` and `101_flow_set_vars`, well clear of upstream.
+
+Their effects are already in production, so they must be *recorded*, not
+replayed (replaying 100 hits the CHECK trap described above). Upstream's
+043-059 must then run:
+
+```bash
+supabase migration repair --status reverted 043 044   # those rows were the fork's
+supabase migration repair --status applied 100 101    # effects already present
+supabase db push --dry-run   # expect 043-049, 051-054, 059 and nothing else
+supabase db push
+```
+
+Check `supabase/ci/verify-schema.sql` afterwards.
 
 ## Translation catalogues
 
