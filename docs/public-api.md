@@ -5,8 +5,8 @@ scripts and automations — send messages, manage contacts, launch
 broadcasts — without going through the dashboard UI.
 
 > **Status:** stable. Authentication, scopes, rate limiting, the
-> messages / contacts / conversations / broadcasts endpoints, and
-> outbound event [webhooks](#webhooks) all ship now.
+> messages / contacts / conversations / templates / broadcasts
+> endpoints, and outbound event [webhooks](#webhooks) all ship now.
 
 ## Authentication
 
@@ -48,6 +48,7 @@ it. Grant the minimum.
 | `contacts:read`      | List and read contacts                   |
 | `contacts:write`     | Create and update contacts               |
 | `conversations:read` | List and read conversations              |
+| `templates:read`     | List approved message templates          |
 | `broadcasts:send`    | Launch broadcast campaigns               |
 | `webhooks:manage`    | Register and manage outbound webhooks    |
 
@@ -226,6 +227,43 @@ Paginated. Each message includes its `direction` (`inbound` /
 `outbound`), `status` (delivery state), `whatsapp_message_id`, and
 `content_*`. The conversation is verified to belong to your account
 first (`404` otherwise).
+
+### `GET /api/v1/templates`
+
+List message templates, newest first. Scope: `templates:read`.
+Paginated.
+
+**Defaults to `APPROVED` only.** A template in any other state cannot
+be sent — Meta refuses `DRAFT`, `PENDING`, `REJECTED` and
+`PENDING_DELETION` outright, and a `PAUSED` one until its quality
+recovers — and a caller listing templates is almost always about to
+send one. Pass `?status=` with any status from the schema
+(`DRAFT`, `PENDING`, `APPROVED`, `REJECTED`, `PAUSED`, `DISABLED`,
+`IN_APPEAL`, `PENDING_DELETION`, case-insensitive) or `?status=all`
+to see the rest.
+
+`sample_values` is the machine-readable signal for how many positional
+body variables a template takes: the length of its `body` array.
+`body_text` carries them as `{{1}}`, `{{2}}` …, which a caller would
+otherwise have to parse out of prose. Those are the values
+`POST /api/v1/messages` expects in `template.params`.
+
+```json
+{
+  "data": [
+    {
+      "id": "…", "name": "order_update", "language": "en_US",
+      "category": "Utility", "status": "APPROVED",
+      "body_text": "Your order {{1}} has shipped.",
+      "header_type": null, "footer_text": null, "buttons": null,
+      "sample_values": { "body": ["A123"], "header": [] },
+      "quality_score": "GREEN",
+      "created_at": "…", "updated_at": "…"
+    }
+  ],
+  "meta": { "next_cursor": null }
+}
+```
 
 ### `POST /api/v1/broadcasts`
 
