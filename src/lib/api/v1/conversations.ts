@@ -10,6 +10,24 @@
 
 import type { Conversation, Message } from '@/types';
 
+/**
+ * The `ilike` pattern for `?phone=`, or null when there is nothing to match.
+ *
+ * Digits only, because the same number is stored as `+916235255666` here and
+ * typed as `+91 62352 55666`, `916235255666` or `6235255666` elsewhere. Ten
+ * digits is the floor: a shorter query is a substring of half the directory,
+ * and `ilike` has no word boundary to lean on.
+ *
+ * It is a CONTAINS match by design, so a caller holding a bare national number
+ * finds a contact stored with its country code. The caller is therefore
+ * expected to verify the number it gets back - an exact match here would
+ * simply refuse the common case instead.
+ */
+export function conversationPhoneFilter(raw: string | null): string | null {
+  const digits = (raw ?? '').replace(/\D/g, '');
+  return digits.length >= 10 ? `%${digits}%` : null;
+}
+
 export interface ApiConversation {
   id: string;
   contact_id: string;

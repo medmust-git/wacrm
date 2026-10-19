@@ -9,6 +9,18 @@ import type { Conversation, Contact, Tag } from "@/types";
 export const CONVERSATION_SELECT =
   "*, contact:contacts(*, contact_tags(tags(*)))";
 
+/**
+ * The same embed, required rather than optional.
+ *
+ * For filtering on a column of the embedded contact: PostgREST applies the
+ * filter but returns the row with a null contact unless the embed is inner, so
+ * an outer join would match every conversation. A separate literal and not a
+ * `.replace()` on the one above, because supabase-js infers the row type from
+ * the select STRING and loses it the moment the argument is computed.
+ */
+export const CONVERSATION_SELECT_WITH_CONTACT =
+  "*, contact:contacts!inner(*, contact_tags(tags(*)))";
+
 /** Raw shape returned by {@link CONVERSATION_SELECT} before flattening. */
 type RawContact = Contact & { contact_tags?: { tags: Tag | null }[] };
 type RawConversation = Omit<Conversation, "contact"> & {

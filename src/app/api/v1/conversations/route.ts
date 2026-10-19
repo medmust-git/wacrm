@@ -2,8 +2,8 @@
 // GET /api/v1/conversations — list conversations (scope: conversations:read)
 //
 // Keyset-paginated (newest first). Filters: `?status=` (open/pending/
-// closed) and `?contact_id=`. Each conversation embeds its contact +
-// tags via the shared CONVERSATION_SELECT.
+// closed), `?contact_id=` and `?phone=`. Each conversation embeds its
+// contact + tags via the shared CONVERSATION_SELECT.
 // ============================================================
 
 import { requireApiKey } from '@/lib/auth/api-context';
@@ -18,9 +18,13 @@ import {
 } from '@/lib/api/v1/pagination';
 import {
   CONVERSATION_SELECT,
+  CONVERSATION_SELECT_WITH_CONTACT,
   normalizeConversation,
 } from '@/lib/inbox/conversations';
-import { serializeConversation } from '@/lib/api/v1/conversations';
+import {
+  conversationPhoneFilter,
+  serializeConversation,
+} from '@/lib/api/v1/conversations';
 import type { Conversation } from '@/types';
 
 export async function GET(request: Request) {
@@ -36,14 +40,27 @@ export async function GET(request: Request) {
     if (contactId && !isUuid(contactId)) {
       return fail('bad_request', "'contact_id' must be a contact id (UUID)", 400);
     }
+    const rawPhone = url.searchParams.get('phone');
+    const phone = conversationPhoneFilter(rawPhone);
+    if (rawPhone !== null && !phone) {
+      return fail('bad_request', "'phone' needs at least 10 digits", 400);
+    }
 
-    let query = ctx.supabase
-      .from('conversations')
-      .select(CONVERSATION_SELECT)
-      .eq('account_id', ctx.accountId);
+    // An INNER join only when filtering by phone - see
+    // `CONVERSATION_SELECT_WITH_CONTACT` on why both are literals.
+    let query = (phone
+      ? ctx.supabase.from('conversations').select(CONVERSATION_SELECT_WITH_CONTACT)
+      : ctx.supabase.from('conversations').select(CONVERSATION_SELECT)
+    ).eq('account_id', ctx.accountId);
 
     if (status) query = query.eq('status', status);
     if (contactId) query = query.eq('contact_id', contactId);
+    // Why a filter and not a search: a caller looking up one customer by
+    // number should not have to page the whole inbox to find them. The scope
+    // is still `conversations:read`, so this grants nothing new - it removes
+    // the need for `contacts:read` to answer "which conversation is this
+    // number?".
+    if (phone) query = query.ilike('contact.phone', phone);
 
     // Ordered by LAST MESSAGE, not by creation. An inbox is sorted by
     // what happened last: ordering by `created_at` put a customer who

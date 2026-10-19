@@ -2,12 +2,21 @@ import { describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   eqCalls: [] as [string, unknown][],
+  ilikeCalls: [] as [string, unknown][],
   orderCalls: [] as [string, unknown][],
+  selectCalls: [] as string[],
 }));
 
 function fakeSupabase() {
   const builder: Record<string, unknown> = {
-    select: () => builder,
+    select: (columns: string) => {
+      mocks.selectCalls.push(columns);
+      return builder;
+    },
+    ilike: (column: string, value: unknown) => {
+      mocks.ilikeCalls.push([column, value]);
+      return builder;
+    },
     eq: (column: string, value: unknown) => {
       mocks.eqCalls.push([column, value]);
       return builder;
@@ -71,5 +80,38 @@ describe('ordering', () => {
     // id breaks the tie, and is what the keyset cursor pages on.
     expect(mocks.orderCalls[1]).toEqual(['id', { ascending: false }]);
     expect(mocks.orderCalls.map(([column]) => column)).not.toContain('created_at');
+  });
+});
+
+describe('?phone=', () => {
+  it('filters on the embedded contact, with an inner join', async () => {
+    mocks.ilikeCalls.length = 0;
+    mocks.selectCalls.length = 0;
+    const res = await GET(
+      new Request('https://x.test/api/v1/conversations?phone=%2B91+62352+55666')
+    );
+    expect(res.status).toBe(200);
+    // Digits only: the column holds `+916235255666`, callers type anything.
+    expect(mocks.ilikeCalls).toContainEqual(['contact.phone', '%916235255666%']);
+    // Without `!inner` PostgREST returns the row with a null contact rather
+    // than filtering it out, so every conversation would match.
+    expect(mocks.selectCalls.at(-1)).toContain('contacts!inner(');
+  });
+
+  it('keeps the outer join when no phone is given', async () => {
+    mocks.ilikeCalls.length = 0;
+    mocks.selectCalls.length = 0;
+    const res = await GET(new Request('https://x.test/api/v1/conversations'));
+    expect(res.status).toBe(200);
+    expect(mocks.ilikeCalls).toEqual([]);
+    expect(mocks.selectCalls.at(-1)).not.toContain('!inner');
+  });
+
+  it('refuses a number too short to identify anyone', async () => {
+    const res = await GET(
+      new Request('https://x.test/api/v1/conversations?phone=55666')
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('bad_request');
   });
 });
