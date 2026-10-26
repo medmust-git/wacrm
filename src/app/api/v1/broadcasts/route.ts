@@ -22,7 +22,7 @@
 //               "total_recipients", "accepted", "rejected" } }
 // ============================================================
 
-import { after } from 'next/server';
+import { deferWork } from '@/lib/runtime/defer';
 
 import { requireApiKey } from '@/lib/auth/api-context';
 
@@ -77,7 +77,7 @@ export async function POST(request: Request) {
     // Fan out after the response is sent. Uses the same service-role
     // client — no request-scoped auth needed for the Meta calls or
     // the account-scoped row updates.
-    after(() => deliverBroadcast(ctx.supabase, plan));
+    await deferWork('v1-broadcast', () => deliverBroadcast(ctx.supabase, plan));
 
     return ok(
       {

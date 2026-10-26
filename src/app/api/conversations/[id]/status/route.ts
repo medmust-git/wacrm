@@ -1,4 +1,5 @@
-import { NextResponse, after } from 'next/server'
+import { NextResponse } from 'next/server'
+import { deferWork } from '@/lib/runtime/defer'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
@@ -53,7 +54,7 @@ export async function POST(request: Request, { params }: Params) {
     if (status === 'closed' && conv.status !== 'closed' && conv.contact_id) {
       // After the response: the automation sends a WhatsApp message, and the
       // agent's click must not wait on Meta.
-      after(async () => {
+      await deferWork('conversation-closed', async () => {
         const db = supabaseAdmin()
         const latest = async (senderType: 'agent' | 'customer') => {
           const { data } = await db

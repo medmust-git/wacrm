@@ -1,4 +1,5 @@
-import { NextResponse, after } from 'next/server'
+import { NextResponse } from 'next/server'
+import { deferWork } from '@/lib/runtime/defer'
 import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
@@ -281,7 +282,11 @@ export async function POST(request: Request) {
   // (see issue #301). `after()` hands the callback to the runtime, which
   // keeps the function alive until it resolves (within the route's
   // maxDuration).
-  after(async () => {
+  //
+  // On this fork's Cloud Run deploy, WACRM_INLINE_AFTER=1 runs it before the
+  // ack instead (see src/lib/runtime/defer.ts). A slower ack is safe: a Meta
+  // retry of a message already stored is ignored before any dispatch.
+  await deferWork('webhook', async () => {
     try {
       await processWebhook(body)
     } catch (error) {

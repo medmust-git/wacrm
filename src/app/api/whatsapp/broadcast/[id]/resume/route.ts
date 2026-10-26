@@ -15,7 +15,7 @@
 // ============================================================
 
 import { NextResponse } from 'next/server';
-import { after } from 'next/server';
+import { deferWork } from '@/lib/runtime/defer';
 
 import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import {
@@ -99,7 +99,7 @@ export async function POST(
     // every id in the plan was already resolved through an
     // account-scoped read above.
     const admin = supabaseAdmin();
-    after(async () => {
+    await deferWork('broadcast-resume', async () => {
       try {
         await deliverBroadcast(admin, plan);
       } catch (err) {

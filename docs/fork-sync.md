@@ -73,6 +73,38 @@ supabase db push
 
 Check `supabase/ci/verify-schema.sql` afterwards.
 
+## Cloud Run billing: `after()` runs inline
+
+The production service (`wacrm`, project `medmust-crm`, region
+`asia-southeast1`) uses request-based billing (`--cpu-throttling`) and
+scales to zero. Until 2026-10-27 it kept CPU always allocated. Combined with
+the two Cloud Scheduler crons every 5 minutes, that kept one instance billed
+around the clock (about Rs 4,500 a month).
+
+CPU was always allocated because upstream runs follow-up work in Next's
+`after()`: inbound webhook processing, API-launched broadcasts, broadcast
+resume, and the conversation-closed automation. Under request-based billing,
+CPU is throttled once the response is sent, so that work would stall.
+
+`src/lib/runtime/defer.ts` (`deferWork`) wraps those call sites. With
+`WACRM_INLINE_AFTER=1` set on the service, the work runs before the response
+instead. With the variable unset, it calls `after()` exactly as upstream
+does. Webhook acks are slower as a result. That is safe: an inbound message
+Meta retries is dropped as a duplicate before any flow, automation or AI
+dispatch.
+
+Deploy with both flags:
+
+```bash
+gcloud run deploy wacrm --project medmust-crm --region asia-southeast1 \
+  --image asia-south1-docker.pkg.dev/medmust-crm/wacrm/app:<sha> \
+  --cpu-throttling --update-env-vars WACRM_INLINE_AFTER=1
+```
+
+**Rule for every sync:** after merging upstream, run
+`grep -rnE "\bafter\(" src/app` and route any new call site through
+`deferWork`. A bare `after()` on this deploy silently loses its work.
+
 ## Translation catalogues
 
 `src/i18n/messages.test.ts` requires every locale to carry every `en.json` key.
