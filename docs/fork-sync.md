@@ -105,6 +105,20 @@ gcloud run deploy wacrm --project medmust-crm --region asia-southeast1 \
 `grep -rnE "\bafter\(" src/app` and route any new call site through
 `deferWork`. A bare `after()` on this deploy silently loses its work.
 
+## 2026-11-02 sync
+
+- Upstream added migrations 055, 057 and 058. They sit below the remote's
+  059 and the fork's 100 and 101, so push with
+  `supabase db push --include-all`. 057 deletes duplicate
+  `message_templates` rows per (account, name, language) and makes that
+  combination unique. MedMust's `scripts/whatsapp-templates.mjs` already
+  upserts on exactly that key.
+- Upstream's flow engine now ends a run with one atomic claim when the
+  fallback is exhausted. The fork's restart-on-exhaust writes
+  `end_reason: fallback_restart` in that claim, then starts the new run.
+- Upstream added a bare `after()` in `POST /api/v1/messages`. It now goes
+  through `deferWork`, as the Cloud Run billing rule above requires.
+
 ## Translation catalogues
 
 `src/i18n/messages.test.ts` requires every locale to carry every `en.json` key.
